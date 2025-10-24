@@ -3,9 +3,11 @@
 from typing import Tuple
 import numpy as np
 import geopandas as gpd
+import rasterio
 from rasterio import features
 from rasterio.transform import from_bounds
 from affine import Affine
+from pathlib import Path
 from ..utils.logger import get_logger
 
 logger = get_logger()
@@ -30,16 +32,17 @@ class Rasterizer:
         buffer: float = 10.0,
     ) -> Tuple[np.ndarray, Affine, Tuple[float, float, float, float]]:
         """
-        Rasterize buildings within a district with floor values.
+        Rasterize buildings within a district with Floor values.
+        Areas outside the district are set to -999 (NoData).
 
         Args:
             district_geometry: Shapely geometry of the district
-            buildings: GeoDataFrame with building polygons and 'floor' attribute
+            buildings: GeoDataFrame with building polygons and 'Floor' attribute
             buffer: Buffer around district bounds in meters (default: 10.0)
 
         Returns:
             Tuple of (raster_array, affine_transform, bounds)
-            - raster_array: 2D numpy array with background=0, building pixels=floor value
+            - raster_array: 2D numpy array with background=0, building pixels=Floor value, outside district=-999
             - affine_transform: Affine transformation matrix
             - bounds: (minx, miny, maxx, maxy)
         """
@@ -61,8 +64,14 @@ class Rasterizer:
         # Create affine transform
         transform = from_bounds(minx, miny, maxx, maxy, width, height)
 
-        # Initialize raster with zeros
-        raster = np.zeros((height, width), dtype=np.float32)
+        # Initialize raster with NoData values (-999) for areas outside district
+        raster = np.full((height, width), -999.0, dtype=np.float32)
+        
+        # Create district mask to identify areas inside the district
+        district_mask = self.rasterize_district_mask(district_geometry, transform, (height, width))
+        
+        # Set areas inside district to 0 (background)
+        raster[district_mask == 1] = 0.0
 
         if len(buildings) == 0:
             logger.warning("No buildings to rasterize")
@@ -71,12 +80,12 @@ class Rasterizer:
         # Prepare geometries and values for rasterization
         shapes = []
         for _, building in buildings.iterrows():
-            floor_value = building.get("floor", 1.0)
-            if floor_value > 0:  # Only rasterize buildings with positive floor values
+            floor_value = building.get("Floor", 1.0)
+            if floor_value > 0:  # Only rasterize buildings with positive Floor values
                 shapes.append((building.geometry, float(floor_value)))
 
         if shapes:
-            # Rasterize buildings
+            # Rasterize buildings (only in areas where district_mask == 1)
             rasterized = features.rasterize(
                 shapes=shapes,
                 out_shape=(height, width),
@@ -85,11 +94,14 @@ class Rasterizer:
                 all_touched=True,
                 dtype=np.float32,
             )
-            raster = rasterized
+            # Only update pixels that are inside the district
+            raster[(district_mask == 1) & (rasterized > 0)] = rasterized[(district_mask == 1) & (rasterized > 0)]
 
         logger.debug(
-            "Rasterized %d buildings, coverage: %.2f%%",
-            len(shapes), (raster > 0).sum() / raster.size * 100
+            "Rasterized %d buildings, coverage: %.2f%% (inside district: %.2f%%)",
+            len(shapes), 
+            (raster > 0).sum() / raster.size * 100,
+            (district_mask == 1).sum() / raster.size * 100
         )
 
         return raster, transform, bounds
@@ -126,4 +138,41 @@ class Rasterizer:
         )
 
         return mask
+
+    def save_raster_as_tif(
+        self,
+        raster: np.ndarray,
+        transform: Affine,
+        output_path: Path,
+        crs: str = "EPSG:32650",
+        nodata: float = -999.0,
+    ) -> None:
+        """
+        Save raster array as GeoTIFF file.
+
+        Args:
+            raster: 2D numpy array to save
+            transform: Affine transformation matrix
+            output_path: Path where to save the TIF file
+            crs: Coordinate reference system (default: EPSG:32650)
+            nodata: NoData value (default: -999.0)
+        """
+        # Ensure output directory exists
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+
+        with rasterio.open(
+            output_path,
+            'w',
+            driver='GTiff',
+            height=raster.shape[0],
+            width=raster.shape[1],
+            count=1,
+            dtype=raster.dtype,
+            crs=crs,
+            transform=transform,
+            nodata=nodata,
+        ) as dst:
+            dst.write(raster, 1)
+
+        logger.info("Saved raster to %s", output_path)
 

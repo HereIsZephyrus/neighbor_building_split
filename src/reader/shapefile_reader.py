@@ -62,7 +62,7 @@ class ShapefileReader:
 
         Raises:
             FileNotFoundError: If building file doesn't exist
-            ValueError: If 'floor' attribute is missing
+            ValueError: If 'Floor' attribute is missing
         """
         if not self.building_path.exists():
             raise FileNotFoundError(f"Building file not found: {self.building_path}")
@@ -70,8 +70,8 @@ class ShapefileReader:
         logger.info("Loading buildings from %s", self.building_path)
         gdf = gpd.read_file(self.building_path)
 
-        if "floor" not in gdf.columns:
-            raise ValueError("Building shapefile must contain 'floor' attribute")
+        if "Floor" not in gdf.columns:
+            raise ValueError("Building shapefile must contain 'Floor' attribute")
 
         if gdf.crs is None:
             logger.warning("Building CRS is None, assuming EPSG:32650")
@@ -88,13 +88,13 @@ class ShapefileReader:
         self, district_geometry
     ) -> gpd.GeoDataFrame:
         """
-        Filter buildings that intersect with a district geometry.
+        Clip buildings to district geometry and return only buildings within the district.
 
         Args:
             district_geometry: Shapely geometry of the district
 
         Returns:
-            GeoDataFrame with buildings within the district
+            GeoDataFrame with buildings clipped to the district boundary
         """
         if self._buildings is None:
             self.load_buildings()
@@ -103,17 +103,26 @@ class ShapefileReader:
         bbox = box(*district_geometry.bounds)
         buildings_bbox = self._buildings[self._buildings.intersects(bbox)]
 
-        # Then precise intersection
-        buildings_in_district = buildings_bbox[
-            buildings_bbox.intersects(district_geometry)
-        ]
+        if len(buildings_bbox) == 0:
+            logger.debug("No buildings found in district bounding box")
+            return gpd.GeoDataFrame(columns=self._buildings.columns, crs=self._buildings.crs)
+
+        # Clip buildings to district geometry
+        # Create a GeoDataFrame with the district geometry for clipping
+        district_gdf = gpd.GeoDataFrame([1], geometry=[district_geometry], crs=self._buildings.crs)
+        
+        # Perform spatial clip operation
+        buildings_clipped = gpd.clip(buildings_bbox, district_gdf)
+
+        # Filter out empty geometries that might result from clipping
+        buildings_clipped = buildings_clipped[~buildings_clipped.geometry.is_empty]
 
         logger.debug(
-            "Found %d buildings in district (from %d total)",
-            len(buildings_in_district), len(self._buildings)
+            "Found %d buildings in district (from %d in bbox, %d total)",
+            len(buildings_clipped), len(buildings_bbox), len(self._buildings)
         )
 
-        return buildings_in_district
+        return buildings_clipped
 
     @property
     def districts(self) -> gpd.GeoDataFrame:

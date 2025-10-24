@@ -1,16 +1,15 @@
 """Main script for building pattern segmentation."""
 
 import sys
+import logging
+from datetime import datetime
 from tqdm import tqdm
 import pandas as pd
 
-from .utils.config import Config
-from .utils.logger import setup_logger
-from .reader.shapefile_reader import ShapefileReader
-from .converter.rasterizer import Rasterizer
-from .converter.vectorizer import Vectorizer
-from .segmentation.feature_extractor import FeatureExtractor
-from .segmentation.classical_segmenter import ClassicalSegmenter
+from .utils import Config, setup_logger
+from .reader import ShapefileReader
+from .converter import Rasterizer, Vectorizer
+from .segmentation import FeatureExtractor, ClassicalSegmenter
 
 
 def main():
@@ -24,8 +23,8 @@ def main():
         sys.exit(1)
 
     # Setup logger
-    log_file = config.output_dir / "segmentation.log"
-    logger = setup_logger(log_file=log_file)
+    log_file = config.output_dir / f"segmentation_{datetime.now().strftime('%Y%m%d_%H')}.log"
+    logger = setup_logger(log_file=log_file, level = logging.DEBUG)
 
     logger.info("=" * 80)
     logger.info("Building Pattern Segmentation")
@@ -59,6 +58,10 @@ def main():
         all_segments = []
         global_cluster_id = 1
 
+        # Save raster as TIF for debugging
+        image_dir = config.output_dir / "debug_rasters"
+        image_dir.mkdir(exist_ok=True)
+
         for idx, district_row in tqdm(
             districts.iterrows(), total=len(districts), desc="Processing districts"
         ):
@@ -86,6 +89,8 @@ def main():
                     logger.warning("Empty raster for district %s, skipping", district_id)
                     continue
 
+                raster_path = image_dir / f"district_{district_id}_raster.tif"
+                rasterizer.save_raster_as_tif(raster, transform, raster_path)
                 # Extract features
                 logger.info("Extracting features...")
                 features = feature_extractor.extract_features(raster)
@@ -158,4 +163,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-

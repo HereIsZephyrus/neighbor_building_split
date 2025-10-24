@@ -157,7 +157,7 @@ class FeatureExtractor:
         Extract height statistics features.
 
         Args:
-            raster: Input raster array with floor values
+            raster: Input raster array with Floor values
             window_sizes: Window sizes for statistics calculation
 
         Returns:

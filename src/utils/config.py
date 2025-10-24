@@ -84,4 +84,3 @@ class Config:
             "use_cnn_features": self.use_cnn_features,
             "cnn_model": self.cnn_model,
         }
-

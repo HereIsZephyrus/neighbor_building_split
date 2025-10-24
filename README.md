@@ -15,7 +15,7 @@ A Python-based tool for identifying and segmenting building patterns within dist
 1. Load district polygons and building footprints from shapefiles
 2. For each district:
    - Extract buildings within the district boundary
-   - Rasterize buildings at 1m resolution with floor heights as pixel values
+   - Rasterize buildings at 1m resolution with Floor heights as pixel values
    - Extract multi-scale features (CNN + spatial density + height statistics + geometric patterns)
    - Perform SLIC superpixel segmentation
    - Cluster superpixels based on feature similarity
@@ -50,7 +50,7 @@ Create a `.env` file in the project root (use `.env.example` as template):
 ```bash
 # Required paths
 DISTRICT=/path/to/district.shp          # District polygon shapefile
-BUILDING=/path/to/buildings.shp         # Building polygons with 'floor' attribute
+BUILDING=/path/to/buildings.shp         # Building polygons with 'Floor' attribute
 
 # Output directory
 OUTPUT_DIR=./output
@@ -75,7 +75,7 @@ CNN_MODEL=resnet18                      # CNN model: resnet18 or vgg16
 **Building Shapefile (`BUILDING`)**:
 - Geometry type: Polygon or MultiPolygon
 - CRS: Any (will be reprojected to EPSG:32650)
-- **Required attribute**: `floor` (numeric) - building height in floors
+- **Required attribute**: `Floor` (numeric) - building height in floors
 
 ## Usage
 
@@ -127,7 +127,7 @@ src/
 **Feature Extractor**:
 - **CNN Features**: Pre-trained ResNet18/VGG16 for spatial pattern recognition
 - **Density Features**: Multi-scale building coverage ratios
-- **Height Features**: Mean and standard deviation of floor values at multiple scales
+- **Height Features**: Mean and standard deviation of Floor values at multiple scales
 - **Geometric Features**: Edge detection, corner detection, gradient magnitude
 
 **Classical Segmenter**:
@@ -201,11 +201,11 @@ segmenter = DeepLearningSegmenter(model_path="path/to/model.pth")
 # Consider reducing N_SEGMENTS or disabling CNN features
 ```
 
-**2. Missing 'floor' Attribute**
+**2. Missing 'Floor' Attribute**
 ```bash
-# Ensure building shapefile has 'floor' field with numeric values
-# Add default floor values if missing:
-# buildings_gdf['floor'] = 1
+# Ensure building shapefile has 'Floor' field with numeric values
+# Add default Floor values if missing:
+# buildings_gdf['Floor'] = 1
 ```
 
 **3. CRS Mismatch**
@@ -217,7 +217,7 @@ segmenter = DeepLearningSegmenter(model_path="path/to/model.pth")
 **4. Empty Segmentation Results**
 ```bash
 # Check if buildings intersect districts
-# Verify building 'floor' values are > 0
+# Verify building 'Floor' values are > 0
 # Check log file for detailed error messages
 ```
 

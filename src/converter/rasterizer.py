@@ -66,10 +66,10 @@ class Rasterizer:
 
         # Initialize raster with NoData values (-999) for areas outside district
         raster = np.full((height, width), -999.0, dtype=np.float32)
-        
+
         # Create district mask to identify areas inside the district
         district_mask = self.rasterize_district_mask(district_geometry, transform, (height, width))
-        
+
         # Set areas inside district to 0 (background)
         raster[district_mask == 1] = 0.0
 

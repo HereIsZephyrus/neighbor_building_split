@@ -110,7 +110,7 @@ class ShapefileReader:
         # Clip buildings to district geometry
         # Create a GeoDataFrame with the district geometry for clipping
         district_gdf = gpd.GeoDataFrame([1], geometry=[district_geometry], crs=self._buildings.crs)
-        
+
         # Perform spatial clip operation
         buildings_clipped = gpd.clip(buildings_bbox, district_gdf)
 

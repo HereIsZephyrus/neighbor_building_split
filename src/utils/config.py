@@ -26,7 +26,7 @@ class Config:
         load_dotenv(env_path)
 
         # Store parameter overrides
-        self.district_path = district_path
+        self.district_path = Path(district_path)
         self.generate_raw_raster = generate_raw_raster
         self.generate_voronoi_diagram = generate_voronoi_diagram
         self.image_dir = self.output_dir / "raw_rasters"

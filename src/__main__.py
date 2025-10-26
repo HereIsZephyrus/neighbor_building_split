@@ -16,12 +16,12 @@ def parse_arguments():
         description="Building Pattern Segmentation Tool",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
-Examples:
-  # Use CNN segmentation with custom district
-  python -m src --use-cnn-segmentation --district-path /path/to/district.shp
+        Examples:
+          # Generate raster for training
+          python -m src --generate-raster-for-training --district-path /path/to/district.shp
 
-  # Generate voronoi diagram
-  python -m src --generate-voronoi-diagram --district-path /path/to/district.shp
+          # Generate voronoi diagram
+          python -m src --generate-voronoi-diagram --district-path /path/to/district.shp
         """
     )
 
@@ -31,6 +31,11 @@ Examples:
         "--generate-voronoi-diagram",
         action="store_true",
         help="Generate voronoi diagram for the district"
+    )
+    mode_group.add_argument(
+        "--generate-raster-for-training",
+        action="store_true",
+        help="Generate raster for training"
     )
 
     # Data paths

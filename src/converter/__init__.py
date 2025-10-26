@@ -2,5 +2,6 @@
 
 from .rasterizer import Rasterizer
 from .vectorizer import Vectorizer
+from .voronoi_generator import VoronoiGenerator
 
-__all__ = ["Rasterizer", "Vectorizer"]
+__all__ = ["Rasterizer", "Vectorizer", "VoronoiGenerator"]

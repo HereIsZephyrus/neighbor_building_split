@@ -7,7 +7,7 @@ from datetime import datetime
 from tqdm import tqdm
 from .utils import Config, setup_logger
 from .reader import ShapefileReader
-from .converter import Rasterizer
+from .converter import Rasterizer, VoronoiGenerator
 from .processor import process_district
 
 def parse_arguments():
@@ -81,6 +81,12 @@ def main():
     logger.info("Initializing components...")
     reader = ShapefileReader(config.district_path, config.building_path)
     rasterizer = Rasterizer(resolution=1.0)
+    
+    # Initialize Voronoi generator if needed
+    voronoi_generator = None
+    if generate_voronoi_diagram:
+        voronoi_generator = VoronoiGenerator(simplify_tolerance=0.5)
+        logger.info("Voronoi generator initialized")
 
     # Load data
     logger.info("Loading shapefiles...")
@@ -93,7 +99,10 @@ def main():
         districts.iterrows(), total=len(districts), desc="Processing districts"
     ):
         try:
-            process_district(config, reader, logger, rasterizer, district_row, idx)
+            process_district(
+                config, reader, logger, rasterizer, district_row, idx,
+                voronoi_generator=voronoi_generator
+            )
         except Exception as exc:
             logger.error("Error processing district %s: %s",
                         idx, exc, exc_info=True)

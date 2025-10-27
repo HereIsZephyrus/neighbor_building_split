@@ -18,6 +18,7 @@ class Config:
         visualize_voronoi: bool = False,
         viz_interval: int = 1,
         debug_voronoi: bool = False,
+        debug_adjacency: bool = False,
     ):
         """
         Initialize configuration from environment file and optional overrides.
@@ -30,6 +31,7 @@ class Config:
             visualize_voronoi: Whether to visualize Voronoi dilation process
             viz_interval: Show visualization every N iterations
             debug_voronoi: If True, step through iterations with SPACE key
+            debug_adjacency: If True, export adjacency matrix as CSV for debugging
         """
         load_dotenv(env_path)
 
@@ -40,6 +42,7 @@ class Config:
         self.visualize_voronoi = visualize_voronoi
         self.viz_interval = viz_interval
         self.debug_voronoi = debug_voronoi
+        self.debug_adjacency = debug_adjacency
         self.image_dir = self.output_dir / "raw_rasters"
         if self.generate_voronoi_diagram:
             self.voronoi_dir = self.output_dir / "voronoi_diagrams"

@@ -111,7 +111,7 @@ class ShapefileReader:
 
         # Perform spatial clip operation
         buildings_clipped = gpd.clip(buildings_bbox, district_gdf)
-        
+
         logger.debug("Buildings after clip: %d (lost %d)", 
                     len(buildings_clipped), 
                     len(buildings_bbox) - len(buildings_clipped))

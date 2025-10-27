@@ -1,4 +1,4 @@
-from .utils import get_logger
+from .utils import get_logger, create_adjacency_matrix
 
 logger = get_logger()
 
@@ -81,6 +81,20 @@ def process_district(config, reader, rasterizer, district_row, idx, voronoi_gene
                     nodata=-999
                 )
                 logger.info("Voronoi partition raster saved to %s", voronoi_raster_path)
+
+                # Compute and save adjacency matrix
+                logger.info("Computing adjacency matrix...")
+                adjacency_matrix = create_adjacency_matrix(voronoi_gdf, buildings)
+                adjacency_path = config.voronoi_dir / f"district_{district_id}_adjacency.pkl"
+                adjacency_matrix.to_pickle(adjacency_path)
+                logger.info("Adjacency matrix saved to %s (shape: %s)", 
+                           adjacency_path, adjacency_matrix.shape)
+
+                # Export CSV for debugging if requested
+                if config.debug_adjacency:
+                    csv_path = config.voronoi_dir / f"district_{district_id}_adjacency.csv"
+                    adjacency_matrix.to_csv(csv_path)
+                    logger.info("Adjacency matrix CSV exported to %s for debugging", csv_path)
             else:
                 logger.warning("No Voronoi polygons generated for district %s", district_id)
 

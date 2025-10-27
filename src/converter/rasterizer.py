@@ -1,6 +1,7 @@
 """Rasterizer for converting vector geometries to raster format."""
 
 from typing import Tuple
+import math
 import numpy as np
 import geopandas as gpd
 import rasterio
@@ -79,10 +80,37 @@ class Rasterizer:
 
         # Prepare geometries and values for rasterization
         shapes = []
-        for _, building in buildings.iterrows():
+        skipped_invalid = 0
+        converted_floor = 0
+        converted_null = 0
+        
+        for idx, building in buildings.iterrows():
+            # 检查几何有效性
+            if building.geometry is None or building.geometry.is_empty:
+                logger.debug("Skipping building %s: invalid or empty geometry", idx)
+                skipped_invalid += 1
+                continue
+            
+            # 获取 Floor 值
             floor_value = building.get("Floor", 1.0)
-            if floor_value > 0:  # Only rasterize buildings with positive Floor values
-                shapes.append((building.geometry, float(floor_value)))
+            
+            # 关键修复：处理 NULL/NaN/None 值
+            # 在 pandas/geopandas 中，NULL 可能是 None 或 NaN
+            if floor_value is None or (isinstance(floor_value, float) and math.isnan(floor_value)):
+                converted_null += 1
+                floor_value = 1.0
+            elif floor_value <= 0:
+                converted_floor += 1
+                floor_value = 1.0
+            
+            shapes.append((building.geometry, float(floor_value)))
+        
+        if skipped_invalid > 0:
+            logger.warning("Skipped %d buildings with invalid/empty geometries", skipped_invalid)
+        if converted_null > 0:
+            logger.info("Converted %d buildings with Floor = NULL/NaN to Floor = 1.0", converted_null)
+        if converted_floor > 0:
+            logger.info("Converted %d buildings with Floor <= 0 to Floor = 1.0", converted_floor)
 
         if shapes:
             # Rasterize buildings (only in areas where district_mask == 1)
@@ -97,11 +125,22 @@ class Rasterizer:
             # Only update pixels that are inside the district
             raster[(district_mask == 1) & (rasterized > 0)] = rasterized[(district_mask == 1) & (rasterized > 0)]
 
+        building_pixels = (raster > 0).sum()
+        district_pixels = (district_mask == 1).sum()
+        
+        logger.info(
+            "Rasterization complete: %d/%d buildings → %d pixels (%.1f%% of district area)",
+            len(shapes),
+            len(buildings),
+            building_pixels,
+            (building_pixels / district_pixels * 100) if district_pixels > 0 else 0
+        )
+        
         logger.debug(
-            "Rasterized %d buildings, coverage: %.2f%% (inside district: %.2f%%)",
-            len(shapes), 
-            (raster > 0).sum() / raster.size * 100,
-            (district_mask == 1).sum() / raster.size * 100
+            "Raster details: %dx%d pixels, building coverage: %.2f%%, district coverage: %.2f%%",
+            width, height,
+            building_pixels / raster.size * 100,
+            district_pixels / raster.size * 100
         )
 
         return raster, transform, bounds
@@ -128,7 +167,7 @@ class Rasterizer:
             out_shape=shape,
             transform=transform,
             fill=0,
-            all_touched=False,
+            all_touched=True,  # 改为 True，与建筑栅格化一致
             dtype=np.uint8,
         )
 

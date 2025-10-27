@@ -104,8 +104,10 @@ class ShapefileReader:
         buildings_bbox = self._buildings[self._buildings.intersects(bbox)]
 
         if len(buildings_bbox) == 0:
-            logger.debug("No buildings found in district bounding box")
+            logger.warning("No buildings found in district bounding box")
             return gpd.GeoDataFrame(columns=self._buildings.columns, crs=self._buildings.crs)
+
+        logger.debug("Buildings in bounding box: %d", len(buildings_bbox))
 
         # Clip buildings to district geometry
         # Create a GeoDataFrame with the district geometry for clipping
@@ -113,13 +115,29 @@ class ShapefileReader:
 
         # Perform spatial clip operation
         buildings_clipped = gpd.clip(buildings_bbox, district_gdf)
+        
+        logger.debug("Buildings after clip: %d (lost %d)", 
+                    len(buildings_clipped), 
+                    len(buildings_bbox) - len(buildings_clipped))
 
         # Filter out empty geometries that might result from clipping
-        buildings_clipped = buildings_clipped[~buildings_clipped.geometry.is_empty]
+        empty_count = buildings_clipped.geometry.is_empty.sum()
+        if empty_count > 0:
+            logger.debug("Filtering out %d empty geometries", empty_count)
+            buildings_clipped = buildings_clipped[~buildings_clipped.geometry.is_empty]
 
-        logger.debug(
-            "Found %d buildings in district (from %d in bbox, %d total)",
-            len(buildings_clipped), len(buildings_bbox), len(self._buildings)
+        # Fix invalid geometries
+        invalid_count = (~buildings_clipped.geometry.is_valid).sum()
+        if invalid_count > 0:
+            logger.debug("Fixing %d invalid geometries using buffer(0)", invalid_count)
+            buildings_clipped.geometry = buildings_clipped.geometry.buffer(0)
+
+        logger.info(
+            "Found %d buildings in district (from %d in bbox, loss: %d or %.1f%%)",
+            len(buildings_clipped), 
+            len(buildings_bbox),
+            len(buildings_bbox) - len(buildings_clipped),
+            (len(buildings_bbox) - len(buildings_clipped)) / len(buildings_bbox) * 100 if len(buildings_bbox) > 0 else 0
         )
 
         return buildings_clipped

@@ -31,6 +31,7 @@ class VoronoiGenerator:
         district_mask: np.ndarray,
         visualize: bool = False,
         viz_interval: int = 1,
+        debug_mode: bool = False,
     ) -> Tuple[np.ndarray, np.ndarray]:
         """
         Generate Voronoi partition from building raster using dilation method.
@@ -47,6 +48,7 @@ class VoronoiGenerator:
             district_mask: Binary mask (1 inside district, 0 outside)
             visualize: Whether to visualize the dilation process with OpenCV
             viz_interval: Show visualization every N iterations (default: 1)
+            debug_mode: If True, wait for SPACE key press to continue each step
 
         Returns:
             Tuple of (voronoi_partition, original_buildings_mask)
@@ -86,11 +88,13 @@ class VoronoiGenerator:
         # First, dilate to restore original building shapes while keeping labels
         # This ensures buildings maintain their original shapes with proper labels
         voronoi = self._dilate_labels(
-            voronoi, 
-            district_mask, 
-            max_iterations=40,
+            voronoi,
+            district_mask,
+            max_iterations=20,
             visualize=visualize,
-            viz_interval=viz_interval
+            viz_interval=viz_interval,
+            debug_mode=debug_mode,
+            buildings_mask=original_buildings_mask
         )
 
         logger.debug("Voronoi diagram generated with %d regions", num_features)
@@ -100,97 +104,168 @@ class VoronoiGenerator:
     def _generate_color_map(self, num_labels: int) -> np.ndarray:
         """
         Generate random colors for each label for visualization.
-        
+
         Args:
             num_labels: Number of labels to generate colors for
-            
+
         Returns:
             Color map array of shape (num_labels + 1, 3) with BGR colors
         """
         np.random.seed(42)  # For reproducibility
         colors = np.zeros((num_labels + 1, 3), dtype=np.uint8)
         colors[0] = [0, 0, 0]  # Black for unlabeled (background)
-        
+
         # Generate random colors for each label
         for i in range(1, num_labels + 1):
             colors[i] = np.random.randint(0, 256, size=3, dtype=np.uint8)
-        
+
         return colors
-    
+
     def _visualize_labels(
         self,
         labeled_array: np.ndarray,
         color_map: np.ndarray,
         district_mask: np.ndarray,
         iteration: int,
+        buildings_mask: Optional[np.ndarray] = None,
+        debug_mode: bool = False,
         window_name: str = "Voronoi Dilation",
     ) -> None:
         """
         Visualize labeled array using color map.
-        
+
         Args:
             labeled_array: Array with labels
             color_map: Color map for labels (BGR format)
             district_mask: Binary mask defining valid area
             iteration: Current iteration number
+            buildings_mask: Binary mask of original buildings to overlay in white
+            debug_mode: If True, show debug information
             window_name: Name of visualization window
         """
         # Create RGB visualization
         vis_img = np.zeros((*labeled_array.shape, 3), dtype=np.uint8)
-        
+
         # Apply colors based on labels
         for label in range(len(color_map)):
             mask = (labeled_array == label)
             vis_img[mask] = color_map[label]
-        
+
         # Mark outside district area as dark gray
         outside_mask = (district_mask == 0)
         vis_img[outside_mask] = [40, 40, 40]
         
-        # Add iteration counter text
+        # 关键修复：标记未分类的像素为红色（在区域内但没有标签）
+        unlabeled_mask = (labeled_array == 0) & (district_mask == 1)
+        vis_img[unlabeled_mask] = [0, 0, 255]  # BGR: 红色表示未分类
+
+        # Overlay buildings in white (on top of voronoi colors)
+        if buildings_mask is not None:
+            building_pixels = (buildings_mask > 0)
+            vis_img[building_pixels] = [255, 255, 255]  # White for buildings
+
+        # Resize for better viewing - use larger minimum size
+        h, w = vis_img.shape[:2]
+        min_size = 1200  # Increased from 800
+        if h < min_size or w < min_size:
+            scale = max(min_size / h, min_size / w)
+            new_h, new_w = int(h * scale), int(w * scale)
+            vis_img = cv2.resize(vis_img, (new_w, new_h), interpolation=cv2.INTER_NEAREST)
+
         display_img = vis_img.copy()
+
+        # Add iteration counter text (with larger font and background for better visibility)
         text = f"Iteration: {iteration}"
+        (text_w, text_h), baseline = cv2.getTextSize(
+            text, cv2.FONT_HERSHEY_SIMPLEX, 1.2, 2
+        )
+        cv2.rectangle(display_img, (5, 5), (text_w + 15, text_h + baseline + 15), (0, 0, 0), -1)
         cv2.putText(
             display_img,
             text,
-            (10, 30),
+            (10, text_h + 10),
             cv2.FONT_HERSHEY_SIMPLEX,
-            1.0,
+            1.2,
             (255, 255, 255),
             2,
             cv2.LINE_AA
         )
-        
+
         # Calculate remaining unlabeled pixels
         unlabeled = ((labeled_array == 0) & (district_mask == 1)).sum()
-        progress_text = f"Unlabeled: {unlabeled} pixels"
+        # 如果有未分类像素，用红色警告；否则用青色
+        text_color = (0, 0, 255) if unlabeled > 0 else (0, 255, 255)
+        progress_text = f"Unlabeled: {unlabeled} pixels" + (" (RED)" if unlabeled > 0 else "")
+        text_y = text_h + baseline + 35
+        (prog_w, prog_h), prog_baseline = cv2.getTextSize(
+            progress_text, cv2.FONT_HERSHEY_SIMPLEX, 0.9, 2
+        )
+        cv2.rectangle(display_img, (5, text_y - prog_h - 5), 
+                     (prog_w + 15, text_y + prog_baseline + 5), (0, 0, 0), -1)
         cv2.putText(
             display_img,
             progress_text,
-            (10, 70),
+            (10, text_y),
             cv2.FONT_HERSHEY_SIMPLEX,
-            0.8,
-            (255, 255, 255),
+            0.9,
+            text_color,
             2,
             cv2.LINE_AA
         )
         
-        # Resize for better viewing if image is too small
-        h, w = display_img.shape[:2]
-        if h < 800 or w < 800:
-            scale = max(800 / h, 800 / w)
-            new_h, new_w = int(h * scale), int(w * scale)
-            display_img = cv2.resize(display_img, (new_w, new_h), interpolation=cv2.INTER_NEAREST)
+        # 添加颜色图例
+        legend_y = text_y + prog_h + prog_baseline + 20
+        legend_texts = [
+            ("White = Buildings", (255, 255, 255)),
+            ("Colors = Voronoi regions", (100, 255, 100)),
+            ("Red = Unlabeled pixels", (0, 0, 255)),
+            ("Dark gray = Outside district", (100, 100, 100))
+        ]
         
+        for i, (text, color) in enumerate(legend_texts):
+            legend_y_pos = legend_y + i * 22
+            cv2.putText(
+                display_img,
+                text,
+                (10, legend_y_pos),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                0.5,
+                color,
+                1,
+                cv2.LINE_AA
+            )
+
+        # Add debug mode hint if enabled
+        if debug_mode:
+            hint_text = "DEBUG: Press SPACE to continue, 'q' to quit"
+            hint_y = legend_y + len(legend_texts) * 22 + 15
+            (hint_w, hint_h), hint_baseline = cv2.getTextSize(
+                hint_text, cv2.FONT_HERSHEY_SIMPLEX, 0.7, 2
+            )
+            cv2.rectangle(display_img, (5, hint_y - hint_h - 5), 
+                         (hint_w + 15, hint_y + hint_baseline + 5), (0, 0, 128), -1)
+            cv2.putText(
+                display_img,
+                hint_text,
+                (10, hint_y),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                0.7,
+                (255, 255, 0),
+                2,
+                cv2.LINE_AA
+            )
+
         cv2.imshow(window_name, display_img)
-    
+
     def _dilate_labels(
         self,
         labeled_array: np.ndarray,
         district_mask: np.ndarray,
-        max_iterations: int = 40,
+        max_iterations: int = 20,
         visualize: bool = False,
         viz_interval: int = 1,
+        debug_mode: bool = False,
+        buildings_mask: Optional[np.ndarray] = None,
         window_name: str = "Voronoi Dilation Progress",
     ) -> np.ndarray:
         """
@@ -202,6 +277,8 @@ class VoronoiGenerator:
             max_iterations: Maximum number of dilation iterations
             visualize: Whether to visualize the dilation process with OpenCV
             viz_interval: Show visualization every N iterations (default: 1)
+            debug_mode: If True, wait for SPACE key press to continue each step
+            buildings_mask: Binary mask of original buildings to overlay in white
             window_name: Name for the OpenCV visualization window
 
         Returns:
@@ -209,17 +286,21 @@ class VoronoiGenerator:
         """
         result = labeled_array.copy()
         structure = ndimage.generate_binary_structure(2, 2)  # 8-connectivity
-        
+
         # Setup visualization if enabled
         color_map = None
         if visualize:
             num_labels = len(np.unique(result[result > 0]))
             color_map = self._generate_color_map(num_labels)
             cv2.namedWindow(window_name, cv2.WINDOW_NORMAL)
-            logger.info("Visualization enabled. Press 'q' to quit, 'p' to pause/resume, any other key to continue")
+
+            if debug_mode:
+                logger.info("DEBUG MODE: Press SPACE to step through iterations, 'q' to quit")
+            else:
+                logger.info("Visualization enabled. Press 'q' to quit, 'p' to pause/resume")
 
         paused = False
-        
+
         for iteration in range(max_iterations):
             # Find unlabeled pixels within district
             unlabeled_mask = (result == 0) & (district_mask == 1)
@@ -227,8 +308,12 @@ class VoronoiGenerator:
             if not unlabeled_mask.any():
                 logger.debug("All pixels labeled after %d iterations", iteration)
                 if visualize:
-                    self._visualize_labels(result, color_map, district_mask, iteration, window_name)
-                    cv2.waitKey(1000)  # Show final result for 1 second
+                    self._visualize_labels(
+                        result, color_map, district_mask, iteration, 
+                        buildings_mask=buildings_mask, debug_mode=debug_mode, 
+                        window_name=window_name
+                    )
+                    cv2.waitKey(2000)  # Show final result for 2 seconds
                 break
 
             # Dilate each label
@@ -246,24 +331,41 @@ class VoronoiGenerator:
                 if new_pixels.any():
                     result[new_pixels] = label
                     changed = True
-            
+
             # Visualize progress
             if visualize and (iteration % viz_interval == 0 or not changed):
-                self._visualize_labels(result, color_map, district_mask, iteration, window_name)
-                
+                self._visualize_labels(
+                    result, color_map, district_mask, iteration,
+                    buildings_mask=buildings_mask, debug_mode=debug_mode,
+                    window_name=window_name
+                )
+
                 # Handle keyboard input
-                while True:
-                    key = cv2.waitKey(1 if not paused else 0) & 0xFF
-                    
-                    if key == ord('q'):  # Quit
-                        logger.info("Visualization interrupted by user")
-                        cv2.destroyWindow(window_name)
-                        return result
-                    elif key == ord('p'):  # Pause/Resume
-                        paused = not paused
-                        logger.info("Visualization %s", "paused" if paused else "resumed")
-                    elif not paused:  # Continue if not paused
-                        break
+                if debug_mode:
+                    # In debug mode, wait for SPACE key to continue
+                    while True:
+                        key = cv2.waitKey(0) & 0xFF
+
+                        if key == ord('q'):  # Quit
+                            logger.info("Visualization interrupted by user")
+                            cv2.destroyWindow(window_name)
+                            return result
+                        elif key == ord(' '):  # Space - continue to next iteration
+                            break
+                else:
+                    # Normal mode with pause/resume
+                    while True:
+                        key = cv2.waitKey(1 if not paused else 0) & 0xFF
+
+                        if key == ord('q'):  # Quit
+                            logger.info("Visualization interrupted by user")
+                            cv2.destroyWindow(window_name)
+                            return result
+                        elif key == ord('p'):  # Pause/Resume
+                            paused = not paused
+                            logger.info("Visualization %s", "paused" if paused else "resumed")
+                        elif not paused:  # Continue if not paused
+                            break
 
             if not changed:
                 logger.debug("No changes after %d iterations", iteration)
@@ -273,7 +375,25 @@ class VoronoiGenerator:
         remaining = ((result == 0) & (district_mask == 1)).sum()
         if remaining > 0:
             logger.warning("Still have %d unlabeled pixels after dilation", remaining)
-        
+            
+            # 显示最终结果（包含未分类像素）
+            if visualize:
+                logger.info("Showing final result with %d unlabeled pixels (red color)", remaining)
+                self._visualize_labels(
+                    result, color_map, district_mask, max_iterations,
+                    buildings_mask=buildings_mask, debug_mode=debug_mode,
+                    window_name=window_name
+                )
+                # 等待用户查看或自动等待
+                if debug_mode:
+                    logger.info("Press SPACE to continue or 'q' to quit")
+                    while True:
+                        key = cv2.waitKey(0) & 0xFF
+                        if key == ord(' ') or key == ord('q'):
+                            break
+                else:
+                    cv2.waitKey(3000)  # 等待3秒
+
         # Cleanup visualization
         if visualize:
             cv2.destroyWindow(window_name)
@@ -465,6 +585,7 @@ class VoronoiGenerator:
         district_attrs: Optional[dict] = None,
         visualize: bool = False,
         viz_interval: int = 1,
+        debug_mode: bool = False,
     ) -> Tuple[gpd.GeoDataFrame, np.ndarray]:
         """
         Complete workflow: generate Voronoi diagram and extract boundaries.
@@ -477,13 +598,15 @@ class VoronoiGenerator:
             district_attrs: Optional district attributes
             visualize: Whether to visualize the dilation process with OpenCV
             viz_interval: Show visualization every N iterations (default: 1)
+            debug_mode: If True, wait for SPACE key press to continue each step
 
         Returns:
             Tuple of (boundary_lines_gdf, voronoi_partition_array)
         """
         # Generate Voronoi partition
         voronoi, original_buildings_mask = self.generate_voronoi_from_raster(
-            building_raster, district_mask, visualize=visualize, viz_interval=viz_interval
+            building_raster, district_mask, visualize=visualize, 
+            viz_interval=viz_interval, debug_mode=debug_mode
         )
 
         # Extract boundaries (centerlines between regions, excluding buildings)

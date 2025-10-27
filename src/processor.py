@@ -60,7 +60,8 @@ def process_district(config, reader, rasterizer, district_row, idx, voronoi_gene
                 crs="EPSG:32650",
                 district_attrs=district_attrs,
                 visualize=config.visualize_voronoi,
-                viz_interval=config.viz_interval
+                viz_interval=config.viz_interval,
+                debug_mode=config.debug_voronoi
             )
 
             if len(boundary_gdf) > 0:

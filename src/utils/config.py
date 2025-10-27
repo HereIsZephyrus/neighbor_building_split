@@ -15,6 +15,8 @@ class Config:
         district_path: Optional[str] = None,
         generate_raw_raster: bool = False,
         generate_voronoi_diagram: bool = False,
+        visualize_voronoi: bool = False,
+        viz_interval: int = 1,
     ):
         """
         Initialize configuration from environment file and optional overrides.
@@ -22,6 +24,10 @@ class Config:
         Args:
             env_path: Path to .env file (default: ".env")
             district_path: Override district path (takes precedence over .env)
+            generate_raw_raster: Whether to generate raw raster outputs
+            generate_voronoi_diagram: Whether to generate Voronoi diagrams
+            visualize_voronoi: Whether to visualize Voronoi dilation process
+            viz_interval: Show visualization every N iterations
         """
         load_dotenv(env_path)
 
@@ -29,6 +35,8 @@ class Config:
         self.district_path = Path(district_path)
         self.generate_raw_raster = generate_raw_raster
         self.generate_voronoi_diagram = generate_voronoi_diagram
+        self.visualize_voronoi = visualize_voronoi
+        self.viz_interval = viz_interval
         self.image_dir = self.output_dir / "raw_rasters"
         if self.generate_voronoi_diagram:
             self.voronoi_dir = self.output_dir / "voronoi_diagrams"

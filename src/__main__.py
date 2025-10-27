@@ -10,6 +10,14 @@ from .reader import ShapefileReader
 from .converter import Rasterizer, VoronoiGenerator
 from .processor import process_district
 
+# Try to import MPI, but don't fail if not available
+try:
+    from mpi4py import MPI
+    MPI_AVAILABLE = True
+except ImportError:
+    MPI_AVAILABLE = False
+    MPI = None
+
 def parse_arguments():
     """Parse command line arguments."""
     parser = argparse.ArgumentParser(
@@ -70,6 +78,14 @@ def parse_arguments():
         help="Debug mode: export adjacency matrix as CSV in addition to pickle format"
     )
 
+    # Parallel processing options
+    parallel_group = parser.add_argument_group('Parallel Processing Options')
+    parallel_group.add_argument(
+        "--use-mpi",
+        action="store_true",
+        help="Enable MPI parallel processing (requires mpirun/mpiexec and mpi4py)"
+    )
+
     return parser.parse_args()
 
 def main():
@@ -80,6 +96,21 @@ def main():
     # Determine execution mode
     generate_voronoi_diagram = args.generate_voronoi_diagram
     generate_raw_raster = args.generate_raster_for_training
+
+    # Initialize MPI if requested
+    use_mpi = args.use_mpi
+    comm = None
+    rank = 0
+    size = 1
+
+    if use_mpi:
+        if not MPI_AVAILABLE:
+            print("ERROR: MPI requested but mpi4py is not available.")
+            print("Please install mpi4py: pip install mpi4py")
+            sys.exit(1)
+        comm = MPI.COMM_WORLD
+        rank = comm.Get_rank()
+        size = comm.Get_size()
 
     # Load configuration with optional parameter overrides
     try:
@@ -93,18 +124,28 @@ def main():
             debug_adjacency=args.debug_adjacency
         )
     except ValueError as e:
-        print(f"Configuration error: {e}")
-        print("Please provide required paths via arguments or .env file.")
+        if rank == 0:
+            print(f"Configuration error: {e}")
+            print("Please provide required paths via arguments or .env file.")
         sys.exit(1)
 
-    # Setup logger
-    log_file = config.output_dir / f"voronoi_diagram_{datetime.now().strftime('%Y%m%d_%H')}.log" if generate_voronoi_diagram else config.output_dir / f"raster_generation_{datetime.now().strftime('%Y%m%d_%H')}.log"
+    # Setup logger (each rank gets its own log file if using MPI)
+    if use_mpi:
+        log_suffix = f"_rank{rank}" if size > 1 else ""
+    else:
+        log_suffix = ""
+
+    log_file = config.output_dir / f"voronoi_diagram_{datetime.now().strftime('%Y%m%d_%H')}{log_suffix}.log" if generate_voronoi_diagram else config.output_dir / f"raster_generation_{datetime.now().strftime('%Y%m%d_%H')}{log_suffix}.log"
     mode_name = "Voronoi Diagram Generation" if generate_voronoi_diagram else "Raster Generation"
 
     logger = setup_logger(log_file=log_file, level = logging.DEBUG)
-    logger.info("=" * 80)
-    logger.info(mode_name)
-    logger.info("=" * 80)
+
+    if rank == 0:
+        logger.info("=" * 80)
+        logger.info(mode_name)
+        if use_mpi:
+            logger.info("MPI Enabled: %d processes", size)
+        logger.info("=" * 80)
 
     # Initialize components
     logger.info("Initializing components...")
@@ -122,20 +163,60 @@ def main():
     districts = reader.load_districts()
     reader.load_buildings()
 
-    logger.info("Processing %d districts...", len(districts))
+    if rank == 0:
+        logger.info("Processing %d districts...", len(districts))
 
-    for idx, district_row in tqdm(
-        districts.iterrows(), total=len(districts), desc="Processing districts"
-    ):
-        try:
-            process_district(
-                config, reader, rasterizer, district_row, idx,
-                voronoi_generator=voronoi_generator
-            )
-        except Exception as exc:
-            logger.error("Error processing district %s: %s",
-                        idx, exc, exc_info=True)
-            continue
+    # Distribute work among MPI processes if enabled
+    if use_mpi and size > 1:
+        # Divide districts among processes
+        # Each process gets approximately len(districts) / size districts
+        districts_list = list(districts.iterrows())
+        my_districts = districts_list[rank::size]  # Interleaved distribution
+
+        logger.info("Rank %d processing %d districts (indices: %s)", 
+                   rank, len(my_districts), 
+                   [idx for idx, _ in my_districts[:5]] + (['...'] if len(my_districts) > 5 else []))
+
+        # Process assigned districts (no tqdm in parallel mode)
+        completed = 0
+        for idx, district_row in my_districts:
+            try:
+                process_district(
+                    config, reader, rasterizer, district_row, idx,
+                    voronoi_generator=voronoi_generator
+                )
+                completed += 1
+                # Log progress periodically
+                if completed % 10 == 0 or completed == len(my_districts):
+                    logger.info("Rank %d: Completed %d/%d districts (%.1f%%)",
+                               rank, completed, len(my_districts),
+                               completed / len(my_districts) * 100)
+            except Exception as exc:
+                logger.error("Error processing district %s: %s",
+                            idx, exc, exc_info=True)
+                continue
+
+        logger.info("Rank %d finished processing all %d districts", rank, completed)
+
+        # Synchronize all processes before finishing
+        if comm is not None:
+            comm.Barrier()
+            if rank == 0:
+                logger.info("All MPI processes completed")
+    else:
+        # Sequential processing (no MPI or single process)
+        for idx, district_row in tqdm(
+            districts.iterrows(), total=len(districts), desc="Processing districts"
+        ):
+            try:
+                process_district(
+                    config, reader, rasterizer, district_row, idx,
+                    voronoi_generator=voronoi_generator
+                )
+            except Exception as exc:
+                logger.error("Error processing district %s: %s",
+                            idx, exc, exc_info=True)
+                continue
 
 if __name__ == "__main__":
     main()

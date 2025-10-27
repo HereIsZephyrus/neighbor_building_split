@@ -63,11 +63,11 @@ class VoronoiGenerator:
         # Initialize Voronoi partition with building IDs directly
         # No erosion needed - each building is guaranteed to be a connected component
         voronoi = building_raster.copy()
-        
+
         # Count number of unique building IDs
         unique_ids = np.unique(voronoi[voronoi > 0])
         num_features = len(unique_ids)
-        
+
         logger.info("Initialized Voronoi with %d buildings (IDs: %d to %d)", 
                    num_features, unique_ids.min() if num_features > 0 else 0,
                    unique_ids.max() if num_features > 0 else 0)
@@ -93,7 +93,7 @@ class VoronoiGenerator:
         if unclassified_count > 0:
             logger.warning("Setting %d unclassified pixels to NoData (-999)", unclassified_count)
             voronoi[unclassified_mask] = -999
-        
+
         logger.debug("Voronoi diagram generated with %d regions", num_features)
 
         return voronoi, original_buildings_mask
@@ -151,7 +151,7 @@ class VoronoiGenerator:
         # Mark outside district area as dark gray
         outside_mask = (district_mask == 0)
         vis_img[outside_mask] = [40, 40, 40]
-        
+
         # 关键修复：标记未分类的像素为红色（在区域内但没有标签）
         unlabeled_mask = (labeled_array == 0) & (district_mask == 1)
         vis_img[unlabeled_mask] = [0, 0, 255]  # BGR: 红色表示未分类
@@ -209,7 +209,7 @@ class VoronoiGenerator:
             2,
             cv2.LINE_AA
         )
-        
+
         # 添加颜色图例
         legend_y = text_y + prog_h + prog_baseline + 20
         legend_texts = [
@@ -218,7 +218,7 @@ class VoronoiGenerator:
             ("Red = Unlabeled pixels", (0, 0, 255)),
             ("Dark gray = Outside district", (100, 100, 100))
         ]
-        
+
         for i, (text, color) in enumerate(legend_texts):
             legend_y_pos = legend_y + i * 22
             cv2.putText(
@@ -372,7 +372,7 @@ class VoronoiGenerator:
         remaining = ((result == 0) & (district_mask == 1)).sum()
         if remaining > 0:
             logger.warning("Still have %d unlabeled pixels after dilation", remaining)
-            
+
             # 显示最终结果（包含未分类像素）
             if visualize:
                 logger.info("Showing final result with %d unlabeled pixels (red color)", remaining)
@@ -476,7 +476,7 @@ class VoronoiGenerator:
         # Get unique building IDs (excluding 0 = outside, -999 = NoData/unclassified)
         unique_ids = np.unique(voronoi[voronoi > 0])
         num_regions = len(unique_ids)
-        
+
         if num_regions == 0:
             logger.warning("No Voronoi regions to vectorize")
             return gpd.GeoDataFrame(columns=['geometry', 'building_id', 'area'], crs=crs)
@@ -486,7 +486,7 @@ class VoronoiGenerator:
         # Extract polygon shapes from raster
         polygons = []
         building_ids = []
-        
+
         for geom, value in features.shapes(
             voronoi.astype(np.int32),
             transform=transform
@@ -497,7 +497,7 @@ class VoronoiGenerator:
                 if poly.is_valid and not poly.is_empty:
                     polygons.append(poly)
                     building_ids.append(int(value))
-        
+
         if not polygons:
             logger.warning("No valid polygons extracted after vectorization")
             return gpd.GeoDataFrame(columns=['geometry', 'building_id', 'area'], crs=crs)
@@ -701,7 +701,7 @@ class VoronoiGenerator:
     ) -> Tuple[gpd.GeoDataFrame, np.ndarray]:
         """
         Complete workflow: generate Voronoi diagram and extract boundaries.
-        
+
         DEPRECATED: Use generate_voronoi_polygons instead for polygon output.
 
         Args:

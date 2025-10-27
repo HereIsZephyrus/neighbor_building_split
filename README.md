@@ -125,13 +125,49 @@ conda activate spliter
 python -m src
 ```
 
+### Voronoi Boundary Generation
+
+Generate Voronoi-like boundaries using dilation method:
+
+```bash
+# Generate Voronoi boundaries for districts
+python -m src --generate-voronoi-diagram --district-path /path/to/district.shp
+```
+
+This mode:
+1. Identifies connected building components (using 8-connectivity)
+2. Generates Voronoi partitions through iterative dilation
+3. Extracts boundaries between different Voronoi regions
+4. Converts boundaries to vector line features
+
+**Output Files** (saved to `output/voronoi_diagrams/`):
+- `district_{id}_boundaries.shp`: Boundary line features
+- `district_{id}_voronoi.tif`: Voronoi partition raster (for debugging)
+
+**Line Feature Attributes**:
+- `district_id`: District identifier
+- `length`: Line length in meters
+- Original district attributes (inherited)
+
+### Raster Generation for Training
+
+Generate rasters for training data preparation:
+
+```bash
+# Generate rasters for manual labeling
+python -m src --generate-raster-for-training --district-path /path/to/district.shp
+```
+
+Output rasters saved to `output/raw_rasters/`.
+
 ### Output
 
 The script generates:
-- `district_segments.shp`: Segmented regions with continuous cluster IDs
-- `segmentation.log`: Detailed execution log
+- `district_segments.shp`: Segmented regions with continuous cluster IDs (segmentation mode)
+- `district_*_boundaries.shp`: Voronoi boundary lines (Voronoi mode)
+- `*.log`: Detailed execution log
 
-**Output Shapefile Attributes**:
+**Output Shapefile Attributes** (Segmentation mode):
 - `cluster_id`: Unique segment identifier (continuous across all districts)
 - `area`: Segment area in square meters
 - `building_count`: Number of buildings within the segment
@@ -147,7 +183,8 @@ src/
 │   └── shapefile_reader.py      # Load and filter shapefiles
 ├── converter/
 │   ├── rasterizer.py            # Vector to raster conversion (1m resolution)
-│   └── vectorizer.py            # Raster to vector conversion
+│   ├── vectorizer.py            # Raster to vector conversion
+│   └── voronoi_generator.py     # Voronoi diagram generation using dilation
 ├── segmentation/
 │   ├── feature_extractor.py     # CNN + handcrafted feature extraction
 │   ├── classical_segmenter.py   # SLIC + clustering implementation
@@ -161,7 +198,14 @@ src/
 
 ### Key Components
 
-**CNN Segmenter** (New):
+**Voronoi Generator**:
+- **Connected Component Analysis**: Identifies building clusters using 8-connectivity
+- **Dilation-based Voronoi**: Iteratively expands building regions to partition space
+- **Boundary Extraction**: Detects contact lines between adjacent Voronoi regions
+- **Vector Conversion**: Converts raster boundaries to line features with simplification
+- **District-constrained**: Respects district boundaries during partitioning
+
+**CNN Segmenter**:
 - **DeepLabV3 Architecture**: State-of-the-art semantic segmentation
 - **ResNet34 Backbone**: Pre-trained on ImageNet for transfer learning
 - **ASPP Module**: Atrous Spatial Pyramid Pooling for multi-scale context

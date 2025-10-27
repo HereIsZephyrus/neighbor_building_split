@@ -64,7 +64,12 @@ def parse_arguments():
         action="store_true",
         help="Debug mode: press SPACE to step through each iteration (only with --visualize)"
     )
-    
+    viz_group.add_argument(
+        "--debug-adjacency",
+        action="store_true",
+        help="Debug mode: export adjacency matrix as CSV in addition to pickle format"
+    )
+
     return parser.parse_args()
 
 def main():
@@ -84,7 +89,8 @@ def main():
             generate_voronoi_diagram=generate_voronoi_diagram,
             visualize_voronoi=args.visualize,
             viz_interval=args.viz_interval,
-            debug_voronoi=args.debug_voronoi
+            debug_voronoi=args.debug_voronoi,
+            debug_adjacency=args.debug_adjacency
         )
     except ValueError as e:
         print(f"Configuration error: {e}")

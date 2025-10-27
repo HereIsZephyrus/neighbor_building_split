@@ -82,7 +82,7 @@ class Rasterizer:
         shapes = []
         skipped_invalid = 0
         missing_id = 0
-        
+
         # Determine which ID field to use
         id_field = None
         for possible_id in ['FID', 'OBJECTID', 'ID', 'id', 'fid']:
@@ -90,14 +90,14 @@ class Rasterizer:
                 id_field = possible_id
                 logger.debug("Using '%s' field as building ID", id_field)
                 break
-        
+
         for idx, building in buildings.iterrows():
             # 检查几何有效性
             if building.geometry is None or building.geometry.is_empty:
                 logger.debug("Skipping building %s: invalid or empty geometry", idx)
                 skipped_invalid += 1
                 continue
-            
+
             # 获取建筑ID值
             if id_field is not None:
                 building_id = building.get(id_field)
@@ -114,9 +114,9 @@ class Rasterizer:
                 if missing_id == 0:  # 只记录一次警告
                     logger.warning("No ID field found in buildings, using index as ID")
                 missing_id += 1
-            
+
             shapes.append((building.geometry, building_id))
-        
+
         if skipped_invalid > 0:
             logger.warning("Skipped %d buildings with invalid/empty geometries", skipped_invalid)
         if missing_id > 0 and id_field is not None:
@@ -139,7 +139,7 @@ class Rasterizer:
 
         building_pixels = (raster > 0).sum()
         district_pixels = (district_mask == 1).sum()
-        
+
         logger.info(
             "Rasterization complete: %d/%d buildings → %d pixels (%.1f%% of district area)",
             len(shapes),
@@ -147,7 +147,7 @@ class Rasterizer:
             building_pixels,
             (building_pixels / district_pixels * 100) if district_pixels > 0 else 0
         )
-        
+
         logger.debug(
             "Raster details: %dx%d pixels, building coverage: %.2f%%, district coverage: %.2f%%",
             width, height,

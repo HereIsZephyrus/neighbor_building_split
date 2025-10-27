@@ -7,7 +7,7 @@ from datetime import datetime
 from tqdm import tqdm
 from .utils import Config, setup_logger
 from .reader import ShapefileReader
-from .converter import Rasterizer
+from .converter import Rasterizer, VoronoiGenerator
 from .processor import process_district
 
 def parse_arguments():
@@ -45,6 +45,26 @@ def parse_arguments():
         type=str,
         help="Path to district shapefile (overrides DISTRICT in .env)"
     )
+
+    # Visualization options
+    viz_group = parser.add_argument_group('Visualization Options')
+    viz_group.add_argument(
+        "--visualize",
+        action="store_true",
+        help="Visualize Voronoi dilation process with OpenCV (only with --generate-voronoi-diagram)"
+    )
+    viz_group.add_argument(
+        "--viz-interval",
+        type=int,
+        default=1,
+        help="Show visualization every N iterations (default: 1, only with --visualize)"
+    )
+    viz_group.add_argument(
+        "--debug-voronoi",
+        action="store_true",
+        help="Debug mode: press SPACE to step through each iteration (only with --visualize)"
+    )
+    
     return parser.parse_args()
 
 def main():
@@ -61,7 +81,10 @@ def main():
         config = Config(
             district_path=args.district_path,
             generate_raw_raster=generate_raw_raster,
-            generate_voronoi_diagram=generate_voronoi_diagram
+            generate_voronoi_diagram=generate_voronoi_diagram,
+            visualize_voronoi=args.visualize,
+            viz_interval=args.viz_interval,
+            debug_voronoi=args.debug_voronoi
         )
     except ValueError as e:
         print(f"Configuration error: {e}")
@@ -82,6 +105,12 @@ def main():
     reader = ShapefileReader(config.district_path, config.building_path)
     rasterizer = Rasterizer(resolution=1.0)
 
+    # Initialize Voronoi generator if needed
+    voronoi_generator = None
+    if generate_voronoi_diagram:
+        voronoi_generator = VoronoiGenerator(simplify_tolerance=0.1)
+        logger.info("Voronoi generator initialized")
+
     # Load data
     logger.info("Loading shapefiles...")
     districts = reader.load_districts()
@@ -93,7 +122,10 @@ def main():
         districts.iterrows(), total=len(districts), desc="Processing districts"
     ):
         try:
-            process_district(config, reader, logger, rasterizer, district_row, idx)
+            process_district(
+                config, reader, rasterizer, district_row, idx,
+                voronoi_generator=voronoi_generator
+            )
         except Exception as exc:
             logger.error("Error processing district %s: %s",
                         idx, exc, exc_info=True)

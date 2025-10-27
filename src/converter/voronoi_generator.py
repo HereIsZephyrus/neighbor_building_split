@@ -4,10 +4,11 @@ from typing import Tuple, Optional
 import numpy as np
 import geopandas as gpd
 from scipy import ndimage
-from shapely.geometry import LineString
+from shapely.geometry import LineString, Polygon
 from shapely.ops import linemerge
 from affine import Affine
 import cv2
+from rasterio import features
 from ..utils.logger import get_logger
 
 logger = get_logger()
@@ -37,14 +38,12 @@ class VoronoiGenerator:
         Generate Voronoi partition from building raster using dilation method.
 
         This method:
-        1. Erodes buildings to prevent false connections from rasterization
-        2. Identifies connected components (buildings) in the eroded raster
-        3. Uses dilation to restore original building shapes with labels
-        4. Continues dilation to partition remaining space
-        5. Respects district boundaries
+        1. Uses building IDs directly as seed labels (assumes each building is already a connected component)
+        2. Uses dilation to partition remaining space
+        3. Respects district boundaries
 
         Args:
-            building_raster: 2D array with building pixels > 0, background = 0, outside = -999
+            building_raster: 2D array with building IDs > 0, background = 0, outside = -999
             district_mask: Binary mask (1 inside district, 0 outside)
             visualize: Whether to visualize the dilation process with OpenCV
             viz_interval: Show visualization every N iterations (default: 1)
@@ -52,8 +51,8 @@ class VoronoiGenerator:
 
         Returns:
             Tuple of (voronoi_partition, original_buildings_mask)
-            - voronoi_partition: Array with each region labeled uniquely (0 for outside)
-            - original_buildings_mask: Binary mask of original building pixels (before erosion)
+            - voronoi_partition: Array with each region labeled with building IDs (0 for outside)
+            - original_buildings_mask: Binary mask of original building pixels
         """
         logger.debug("Generating Voronoi diagram using dilation method")
 
@@ -61,42 +60,40 @@ class VoronoiGenerator:
         building_binary = (building_raster > 0).astype(np.uint8)
         original_buildings_mask = building_binary.copy()
 
-        # Apply erosion to prevent false connections from rasterization artifacts
-        # Use 3x3 structure for erosion
-        erosion_structure = ndimage.generate_binary_structure(2, 1)  # 3x3 cross
-        eroded_buildings = ndimage.binary_erosion(
-            building_binary, structure=erosion_structure, iterations=1
-        ).astype(np.uint8)
-
-        logger.debug("Eroded buildings: %d pixels -> %d pixels",
-                    building_binary.sum(), eroded_buildings.sum())
-
-        # Identify connected components in eroded buildings as seeds
-        # Use 4-connectivity to consider only direct neighbors
-        structure = ndimage.generate_binary_structure(2, 1)  # 4-connectivity
-        labeled_buildings, num_features = ndimage.label(eroded_buildings, structure=structure)
-
-        logger.info("Identified %d building connected components", num_features)
+        # Initialize Voronoi partition with building IDs directly
+        # No erosion needed - each building is guaranteed to be a connected component
+        voronoi = building_raster.copy()
+        
+        # Count number of unique building IDs
+        unique_ids = np.unique(voronoi[voronoi > 0])
+        num_features = len(unique_ids)
+        
+        logger.info("Initialized Voronoi with %d buildings (IDs: %d to %d)", 
+                   num_features, unique_ids.min() if num_features > 0 else 0,
+                   unique_ids.max() if num_features > 0 else 0)
 
         if num_features == 0:
             logger.warning("No buildings found, returning empty Voronoi diagram")
             return np.zeros_like(building_raster, dtype=np.int32), original_buildings_mask
 
-        # Initialize Voronoi partition with eroded building labels
-        voronoi = labeled_buildings.copy()
-
-        # First, dilate to restore original building shapes while keeping labels
-        # This ensures buildings maintain their original shapes with proper labels
+        # Dilate to partition remaining space
         voronoi = self._dilate_labels(
             voronoi,
             district_mask,
-            max_iterations=20,
+            max_iterations=30,
             visualize=visualize,
             viz_interval=viz_interval,
             debug_mode=debug_mode,
             buildings_mask=original_buildings_mask
         )
 
+        # Set all unclassified pixels (inside district but not labeled) to -999 (NoData)
+        unclassified_mask = (voronoi == 0) & (district_mask == 1)
+        unclassified_count = unclassified_mask.sum()
+        if unclassified_count > 0:
+            logger.warning("Setting %d unclassified pixels to NoData (-999)", unclassified_count)
+            voronoi[unclassified_mask] = -999
+        
         logger.debug("Voronoi diagram generated with %d regions", num_features)
 
         return voronoi, original_buildings_mask
@@ -261,7 +258,7 @@ class VoronoiGenerator:
         self,
         labeled_array: np.ndarray,
         district_mask: np.ndarray,
-        max_iterations: int = 20,
+        max_iterations: int = 30,
         visualize: bool = False,
         viz_interval: int = 1,
         debug_mode: bool = False,
@@ -452,6 +449,81 @@ class VoronoiGenerator:
 
         return boundaries
 
+    def vectorize_voronoi_polygons(
+        self,
+        voronoi: np.ndarray,
+        transform: Affine,
+        crs: str = "EPSG:32650",
+        district_attrs: Optional[dict] = None,
+    ) -> gpd.GeoDataFrame:
+        """
+        Convert Voronoi partition raster to vector polygon features.
+
+        Uses rasterio.features.shapes to extract polygon geometries for each
+        unique Voronoi region (building).
+
+        Args:
+            voronoi: Labeled Voronoi partition array (0 = outside, -999 = NoData/unclassified)
+            transform: Affine transformation from raster to world coordinates
+            crs: Coordinate reference system
+            district_attrs: Optional district attributes to add to features
+
+        Returns:
+            GeoDataFrame with Voronoi polygons, each labeled with building_id
+        """
+        logger.debug("Vectorizing Voronoi partition to polygon features")
+
+        # Get unique building IDs (excluding 0 = outside, -999 = NoData/unclassified)
+        unique_ids = np.unique(voronoi[voronoi > 0])
+        num_regions = len(unique_ids)
+        
+        if num_regions == 0:
+            logger.warning("No Voronoi regions to vectorize")
+            return gpd.GeoDataFrame(columns=['geometry', 'building_id', 'area'], crs=crs)
+
+        logger.info("Vectorizing %d Voronoi regions", num_regions)
+
+        # Extract polygon shapes from raster
+        polygons = []
+        building_ids = []
+        
+        for geom, value in features.shapes(
+            voronoi.astype(np.int32),
+            transform=transform
+        ):
+            # Skip background (value <= 0) and NoData (value == -999)
+            if value > 0:
+                poly = Polygon(geom['coordinates'][0])
+                if poly.is_valid and not poly.is_empty:
+                    polygons.append(poly)
+                    building_ids.append(int(value))
+        
+        if not polygons:
+            logger.warning("No valid polygons extracted after vectorization")
+            return gpd.GeoDataFrame(columns=['geometry', 'building_id', 'area'], crs=crs)
+
+        logger.info("Extracted %d polygon features", len(polygons))
+
+        # Create GeoDataFrame
+        gdf = gpd.GeoDataFrame({
+            'geometry': polygons,
+            'building_id': building_ids
+        }, crs=crs)
+
+        # Calculate area
+        gdf['area'] = gdf.geometry.area
+
+        # Add district attributes if provided
+        if district_attrs:
+            for key, value in district_attrs.items():
+                if key not in gdf.columns:
+                    gdf[key] = value
+
+        logger.info("Created GeoDataFrame with %d polygon features, total area: %.2f m²",
+                   len(gdf), gdf['area'].sum())
+
+        return gdf
+
     def vectorize_boundaries(
         self,
         boundaries: np.ndarray,
@@ -576,6 +648,46 @@ class VoronoiGenerator:
 
         return gdf
 
+    def generate_voronoi_polygons(
+        self,
+        building_raster: np.ndarray,
+        district_mask: np.ndarray,
+        transform: Affine,
+        crs: str = "EPSG:32650",
+        district_attrs: Optional[dict] = None,
+        visualize: bool = False,
+        viz_interval: int = 1,
+        debug_mode: bool = False,
+    ) -> Tuple[gpd.GeoDataFrame, np.ndarray]:
+        """
+        Complete workflow: generate Voronoi diagram and extract polygon features.
+
+        Args:
+            building_raster: 2D array with building IDs > 0
+            district_mask: Binary mask (1 inside district, 0 outside)
+            transform: Affine transformation matrix
+            crs: Coordinate reference system
+            district_attrs: Optional district attributes
+            visualize: Whether to visualize the dilation process with OpenCV
+            viz_interval: Show visualization every N iterations (default: 1)
+            debug_mode: If True, wait for SPACE key press to continue each step
+
+        Returns:
+            Tuple of (voronoi_polygons_gdf, voronoi_partition_array)
+        """
+        # Generate Voronoi partition
+        voronoi, _ = self.generate_voronoi_from_raster(
+            building_raster, district_mask, visualize=visualize, 
+            viz_interval=viz_interval, debug_mode=debug_mode
+        )
+
+        # Vectorize Voronoi regions as polygons
+        voronoi_gdf = self.vectorize_voronoi_polygons(
+            voronoi, transform, crs, district_attrs
+        )
+
+        return voronoi_gdf, voronoi
+
     def generate_voronoi_boundaries(
         self,
         building_raster: np.ndarray,
@@ -589,6 +701,8 @@ class VoronoiGenerator:
     ) -> Tuple[gpd.GeoDataFrame, np.ndarray]:
         """
         Complete workflow: generate Voronoi diagram and extract boundaries.
+        
+        DEPRECATED: Use generate_voronoi_polygons instead for polygon output.
 
         Args:
             building_raster: 2D array with building pixels > 0

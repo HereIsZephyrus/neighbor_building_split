@@ -35,7 +35,7 @@ def process_district(config, reader, rasterizer, district_row, idx, voronoi_gene
 
     # Generate Voronoi diagram if in voronoi mode
     if config.generate_voronoi_diagram and voronoi_generator is not None:
-        logger.info("Generating Voronoi boundaries...")
+        logger.info("Generating Voronoi polygons...")
 
         # Create district mask
         district_mask = rasterizer.rasterize_district_mask(
@@ -51,9 +51,9 @@ def process_district(config, reader, rasterizer, district_row, idx, voronoi_gene
             if col != 'geometry' and col != 'FID':
                 district_attrs[col] = district_row[col]
 
-        # Generate Voronoi boundaries
+        # Generate Voronoi polygons
         try:
-            boundary_gdf, voronoi_raster = voronoi_generator.generate_voronoi_boundaries(
+            voronoi_gdf, voronoi_raster = voronoi_generator.generate_voronoi_polygons(
                 building_raster=raster,
                 district_mask=district_mask,
                 transform=transform,
@@ -64,26 +64,26 @@ def process_district(config, reader, rasterizer, district_row, idx, voronoi_gene
                 debug_mode=config.debug_voronoi
             )
 
-            if len(boundary_gdf) > 0:
-                # Save boundary lines
-                output_path = config.voronoi_dir / f"district_{district_id}_boundaries.shp"
+            if len(voronoi_gdf) > 0:
+                # Save Voronoi polygons
+                output_path = config.voronoi_dir / f"district_{district_id}_voronoi.shp"
                 config.voronoi_dir.mkdir(parents=True, exist_ok=True)
-                boundary_gdf.to_file(output_path)
-                logger.info("Voronoi boundaries saved to %s (%d features, %.2f m total)",
-                           output_path, len(boundary_gdf), boundary_gdf['length'].sum())
+                voronoi_gdf.to_file(output_path)
+                logger.info("Voronoi polygons saved to %s (%d features, %.2f m² total)",
+                           output_path, len(voronoi_gdf), voronoi_gdf['area'].sum())
 
                 # Optionally save Voronoi partition raster for debugging
-                voronoi_raster_path = config.voronoi_dir / f"district_{district_id}_voronoi.tif"
+                voronoi_raster_path = config.voronoi_dir / f"district_{district_id}_voronoi_raster.tif"
                 rasterizer.save_raster_as_tif(
-                    voronoi_raster.astype('float32'),
+                    voronoi_raster.astype('int32'),
                     transform,
                     voronoi_raster_path,
-                    nodata=0
+                    nodata=-999
                 )
                 logger.info("Voronoi partition raster saved to %s", voronoi_raster_path)
             else:
-                logger.warning("No boundary lines generated for district %s", district_id)
+                logger.warning("No Voronoi polygons generated for district %s", district_id)
 
         except Exception as e:
-            logger.error("Error generating Voronoi boundaries for district %s: %s",
+            logger.error("Error generating Voronoi polygons for district %s: %s",
                         district_id, e, exc_info=True)

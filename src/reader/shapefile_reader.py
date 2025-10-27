@@ -62,16 +62,12 @@ class ShapefileReader:
 
         Raises:
             FileNotFoundError: If building file doesn't exist
-            ValueError: If 'Floor' attribute is missing
         """
         if not self.building_path.exists():
             raise FileNotFoundError(f"Building file not found: {self.building_path}")
 
         logger.info("Loading buildings from %s", self.building_path)
         gdf = gpd.read_file(self.building_path)
-
-        if "Floor" not in gdf.columns:
-            raise ValueError("Building shapefile must contain 'Floor' attribute")
 
         if gdf.crs is None:
             logger.warning("Building CRS is None, assuming EPSG:32650")

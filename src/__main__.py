@@ -103,7 +103,7 @@ def main():
     # Initialize components
     logger.info("Initializing components...")
     reader = ShapefileReader(config.district_path, config.building_path)
-    rasterizer = Rasterizer(resolution=0.5)
+    rasterizer = Rasterizer(resolution=1.0)
 
     # Initialize Voronoi generator if needed
     voronoi_generator = None

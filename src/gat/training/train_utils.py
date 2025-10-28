@@ -24,7 +24,7 @@ def save_checkpoint(
 ) -> None:
     """
     Save model checkpoint.
-    
+
     Args:
         model: Model to save
         optimizer: Optimizer state
@@ -42,13 +42,13 @@ def save_checkpoint(
         'metrics': metrics,
         'config': config.to_dict() if hasattr(config, 'to_dict') else {},
     }
-    
+
     if scheduler is not None:
         checkpoint['scheduler_state_dict'] = scheduler.state_dict()
-    
+
     torch.save(checkpoint, filepath)
     logger.info(f"Checkpoint saved to {filepath}")
-    
+
     if is_best:
         best_path = filepath.parent / 'best_model.pth'
         torch.save(checkpoint, best_path)
@@ -64,31 +64,31 @@ def load_checkpoint(
 ) -> Dict[str, Any]:
     """
     Load model checkpoint.
-    
+
     Args:
         filepath: Path to checkpoint file
         model: Model to load state into
         optimizer: Optional optimizer to load state into
         scheduler: Optional scheduler to load state into
         device: Device to load tensors to
-        
+
     Returns:
         Dictionary with checkpoint information
     """
     logger.info(f"Loading checkpoint from {filepath}")
-    
+
     checkpoint = torch.load(filepath, map_location=device)
-    
+
     model.load_state_dict(checkpoint['model_state_dict'])
-    
+
     if optimizer is not None and 'optimizer_state_dict' in checkpoint:
         optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
-    
+
     if scheduler is not None and 'scheduler_state_dict' in checkpoint:
         scheduler.load_state_dict(checkpoint['scheduler_state_dict'])
-    
+
     logger.info(f"Loaded checkpoint from epoch {checkpoint.get('epoch', 'unknown')}")
-    
+
     return checkpoint
 
 
@@ -100,13 +100,13 @@ def compute_loss_and_metrics(
 ) -> Dict[str, float]:
     """
     Compute loss and metrics.
-    
+
     Args:
         logits: Model output logits (N, C)
         labels: Ground truth labels (N,)
         criterion: Loss function
         mask: Optional mask for which nodes to evaluate
-        
+
     Returns:
         Dictionary with loss and metrics
     """
@@ -114,14 +114,14 @@ def compute_loss_and_metrics(
     if mask is not None:
         logits = logits[mask]
         labels = labels[mask]
-    
+
     # Compute loss
     loss = criterion(logits, labels)
-    
+
     # Compute metrics
     metrics = compute_metrics(logits, labels)
     metrics['loss'] = loss.item()
-    
+
     return metrics
 
 
@@ -133,7 +133,7 @@ def log_metrics_to_tensorboard(
 ) -> None:
     """
     Log metrics to TensorBoard.
-    
+
     Args:
         writer: TensorBoard SummaryWriter
         metrics: Dictionary of metrics to log
@@ -147,13 +147,13 @@ def log_metrics_to_tensorboard(
 def log_model_info(model: nn.Module) -> None:
     """
     Log model information.
-    
+
     Args:
         model: Model to inspect
     """
     total_params = sum(p.numel() for p in model.parameters())
     trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
-    
+
     logger.info(f"Model: {model.__class__.__name__}")
     logger.info(f"Total parameters: {total_params:,}")
     logger.info(f"Trainable parameters: {trainable_params:,}")
@@ -163,35 +163,35 @@ def log_model_info(model: nn.Module) -> None:
 def set_random_seed(seed: int) -> None:
     """
     Set random seed for reproducibility.
-    
+
     Args:
         seed: Random seed
     """
     import random
     import numpy as np
-    
+
     random.seed(seed)
     np.random.seed(seed)
     torch.manual_seed(seed)
-    
+
     if torch.cuda.is_available():
         torch.cuda.manual_seed(seed)
         torch.cuda.manual_seed_all(seed)
         # Make CUDA operations deterministic (may reduce performance)
         torch.backends.cudnn.deterministic = True
         torch.backends.cudnn.benchmark = False
-    
+
     logger.info(f"Random seed set to {seed}")
 
 
 def format_metrics(metrics: Dict[str, float], precision: int = 4) -> str:
     """
     Format metrics dictionary as string.
-    
+
     Args:
         metrics: Dictionary of metrics
         precision: Number of decimal places
-        
+
     Returns:
         Formatted string
     """
@@ -204,24 +204,24 @@ def save_training_history(
 ) -> None:
     """
     Save training history to JSON file.
-    
+
     Args:
         history: Dictionary with lists of metrics over epochs
         filepath: Path to save JSON file
     """
     with open(filepath, 'w') as f:
         json.dump(history, f, indent=2)
-    
+
     logger.info(f"Training history saved to {filepath}")
 
 
 def get_lr(optimizer: torch.optim.Optimizer) -> float:
     """
     Get current learning rate from optimizer.
-    
+
     Args:
         optimizer: PyTorch optimizer
-        
+
     Returns:
         Current learning rate
     """
@@ -232,10 +232,10 @@ def get_lr(optimizer: torch.optim.Optimizer) -> float:
 class EarlyStopping:
     """
     Early stopping handler.
-    
+
     Stops training when validation metric stops improving.
     """
-    
+
     def __init__(
         self,
         patience: int = 100,
@@ -244,7 +244,7 @@ class EarlyStopping:
     ):
         """
         Initialize early stopping.
-        
+
         Args:
             patience: Number of epochs to wait before stopping
             min_delta: Minimum change to qualify as improvement
@@ -256,30 +256,30 @@ class EarlyStopping:
         self.counter = 0
         self.best_score = None
         self.early_stop = False
-        
+
         assert mode in ['max', 'min'], "mode must be 'max' or 'min'"
-        
+
         logger.info(f"Early stopping: patience={patience}, mode={mode}")
-    
+
     def __call__(self, score: float) -> bool:
         """
         Update early stopping state.
-        
+
         Args:
             score: Current validation score
-            
+
         Returns:
             True if should stop training
         """
         if self.best_score is None:
             self.best_score = score
             return False
-        
+
         if self.mode == 'max':
             improved = score > self.best_score + self.min_delta
         else:
             improved = score < self.best_score - self.min_delta
-        
+
         if improved:
             self.best_score = score
             self.counter = 0
@@ -291,12 +291,12 @@ class EarlyStopping:
                 self.early_stop = True
                 return True
             return False
-    
+
     def is_better(self, score: float) -> bool:
         """Check if score is better than current best."""
         if self.best_score is None:
             return True
-        
+
         if self.mode == 'max':
             return score > self.best_score
         else:

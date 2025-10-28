@@ -19,30 +19,30 @@ def node_classification_accuracy(
 ) -> float:
     """
     Compute node classification accuracy.
-    
+
     Args:
         pred: Predicted class logits or labels (N, C) or (N,)
         target: Ground truth labels (N,)
         mask: Optional mask for which nodes to evaluate (N,)
-        
+
     Returns:
         Accuracy as float
     """
     # Convert logits to labels if needed
     if pred.dim() > 1:
         pred = pred.argmax(dim=1)
-    
+
     # Apply mask if provided
     if mask is not None:
         pred = pred[mask]
         target = target[mask]
-    
+
     # Compute accuracy
     correct = (pred == target).sum().item()
     total = target.size(0)
-    
+
     accuracy = correct / total if total > 0 else 0.0
-    
+
     return accuracy
 
 
@@ -54,31 +54,31 @@ def compute_f1_scores(
 ) -> Tuple[float, float]:
     """
     Compute F1 scores (macro and micro).
-    
+
     Args:
         pred: Predicted class logits or labels (N, C) or (N,)
         target: Ground truth labels (N,)
         mask: Optional mask for which nodes to evaluate (N,)
         average: Averaging method ('macro', 'micro', 'weighted')
-        
+
     Returns:
         Tuple of (macro_f1, micro_f1)
     """
     # Convert to numpy
     if pred.dim() > 1:
         pred = pred.argmax(dim=1)
-    
+
     if mask is not None:
         pred = pred[mask]
         target = target[mask]
-    
+
     pred_np = pred.cpu().numpy()
     target_np = target.cpu().numpy()
-    
+
     # Compute F1 scores
     macro_f1 = f1_score(target_np, pred_np, average='macro', zero_division=0)
     micro_f1 = f1_score(target_np, pred_np, average='micro', zero_division=0)
-    
+
     return macro_f1, micro_f1
 
 
@@ -89,24 +89,24 @@ def compute_metrics(
 ) -> dict:
     """
     Compute all metrics (accuracy, F1 scores).
-    
+
     Args:
         pred: Predicted class logits (N, C)
         target: Ground truth labels (N,)
         mask: Optional mask for which nodes to evaluate (N,)
-        
+
     Returns:
         Dictionary with metrics
     """
     accuracy = node_classification_accuracy(pred, target, mask)
     macro_f1, micro_f1 = compute_f1_scores(pred, target, mask)
-    
+
     metrics = {
         'accuracy': accuracy,
         'macro_f1': macro_f1,
         'micro_f1': micro_f1,
     }
-    
+
     return metrics
 
 
@@ -117,27 +117,27 @@ def compute_confusion_matrix(
 ) -> np.ndarray:
     """
     Compute confusion matrix.
-    
+
     Args:
         pred: Predicted class logits or labels (N, C) or (N,)
         target: Ground truth labels (N,)
         mask: Optional mask for which nodes to evaluate (N,)
-        
+
     Returns:
         Confusion matrix as numpy array
     """
     if pred.dim() > 1:
         pred = pred.argmax(dim=1)
-    
+
     if mask is not None:
         pred = pred[mask]
         target = target[mask]
-    
+
     pred_np = pred.cpu().numpy()
     target_np = target.cpu().numpy()
-    
+
     cm = confusion_matrix(target_np, pred_np)
-    
+
     return cm
 
 
@@ -149,7 +149,7 @@ def plot_confusion_matrix(
 ) -> None:
     """
     Plot confusion matrix.
-    
+
     Args:
         cm: Confusion matrix
         class_names: Optional list of class names
@@ -157,27 +157,27 @@ def plot_confusion_matrix(
         figsize: Figure size
     """
     plt.figure(figsize=figsize)
-    
+
     if class_names is None:
         class_names = [str(i) for i in range(cm.shape[0])]
-    
+
     sns.heatmap(
         cm, annot=True, fmt='d', cmap='Blues',
         xticklabels=class_names,
         yticklabels=class_names
     )
-    
+
     plt.xlabel('Predicted Label')
     plt.ylabel('True Label')
     plt.title('Confusion Matrix')
     plt.tight_layout()
-    
+
     if save_path:
         plt.savefig(save_path, dpi=300, bbox_inches='tight')
         logger.info(f"Confusion matrix saved to {save_path}")
     else:
         plt.show()
-    
+
     plt.close()
 
 
@@ -189,32 +189,32 @@ def print_classification_report(
 ) -> str:
     """
     Print classification report.
-    
+
     Args:
         pred: Predicted class logits or labels (N, C) or (N,)
         target: Ground truth labels (N,)
         mask: Optional mask for which nodes to evaluate (N,)
         class_names: Optional list of class names
-        
+
     Returns:
         Classification report as string
     """
     if pred.dim() > 1:
         pred = pred.argmax(dim=1)
-    
+
     if mask is not None:
         pred = pred[mask]
         target = target[mask]
-    
+
     pred_np = pred.cpu().numpy()
     target_np = target.cpu().numpy()
-    
+
     report = classification_report(
         target_np, pred_np,
         target_names=class_names,
         zero_division=0
     )
-    
+
     return report
 
 
@@ -227,7 +227,7 @@ def embedding_tsne(
 ) -> None:
     """
     Visualize embeddings using t-SNE.
-    
+
     Args:
         embeddings: Node embeddings (N, D)
         labels: Node labels (N,)
@@ -236,19 +236,19 @@ def embedding_tsne(
         figsize: Figure size
     """
     from sklearn.manifold import TSNE
-    
+
     logger.info(f"Computing t-SNE with perplexity={perplexity}...")
-    
+
     # Compute t-SNE
     tsne = TSNE(n_components=2, perplexity=perplexity, random_state=42)
     embeddings_2d = tsne.fit_transform(embeddings)
-    
+
     # Plot
     plt.figure(figsize=figsize)
-    
+
     unique_labels = np.unique(labels)
     colors = plt.cm.tab10(np.linspace(0, 1, len(unique_labels)))
-    
+
     for label, color in zip(unique_labels, colors):
         mask = labels == label
         plt.scatter(
@@ -259,18 +259,18 @@ def embedding_tsne(
             alpha=0.6,
             s=50
         )
-    
+
     plt.xlabel('t-SNE dimension 1')
     plt.ylabel('t-SNE dimension 2')
     plt.title('Node Embeddings Visualization (t-SNE)')
     plt.legend()
     plt.tight_layout()
-    
+
     if save_path:
         plt.savefig(save_path, dpi=300, bbox_inches='tight')
         logger.info(f"t-SNE plot saved to {save_path}")
     else:
         plt.show()
-    
+
     plt.close()
 

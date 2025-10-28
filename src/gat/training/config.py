@@ -10,11 +10,11 @@ import torch
 class GATConfig:
     """
     Configuration for GAT model and training.
-    
+
     Follows pytorch-GAT default settings for small graphs (Cora-like),
     adapted for building clustering task.
     """
-    
+
     # Model architecture
     in_features: int = 12  # Number of building features
     hidden_dim: int = 64  # Hidden dimension per head
@@ -24,44 +24,44 @@ class GATConfig:
     dropout: float = 0.6  # Dropout rate (as in pytorch-GAT)
     negative_slope: float = 0.2  # LeakyReLU slope for attention
     add_self_loops: bool = True  # Add self-loops to graphs
-    
+
     # Training parameters
     lr: float = 5e-3  # Learning rate (as in pytorch-GAT)
     weight_decay: float = 5e-4  # L2 regularization (as in pytorch-GAT)
     epochs: int = 200  # Maximum number of epochs
     patience: int = 100  # Early stopping patience
     min_delta: float = 1e-4  # Minimum improvement for early stopping
-    
+
     # Data parameters
     batch_size: int = 1024  # Nodes per batch for NeighborLoader
     num_neighbors: List[int] = field(default_factory=lambda: [15, 10])  # Neighbor sampling
     node_threshold: int = 2000  # Use sampling for graphs > this size
     train_ratio: float = 0.8  # Train/val split ratio
     num_workers: int = 0  # DataLoader workers (0 for debugging, 4+ for speed)
-    
+
     # Paths
     data_dir: str = "output/voronoi"  # Directory with adjacency matrices
     building_shapefile: str = ""  # Path to building shapefile (required)
     checkpoint_dir: str = "models/gat"  # Model checkpoints
     log_dir: str = "runs/gat"  # TensorBoard logs
     output_dir: str = "output/gat"  # Output embeddings
-    
+
     # Device and optimization
     device: str = field(default_factory=lambda: "cuda" if torch.cuda.is_available() else "cpu")
     use_amp: bool = False  # Use automatic mixed precision (optional for 8GB GPU)
     gradient_accumulation_steps: int = 1  # Gradient accumulation for larger effective batch
-    
+
     # Logging and checkpointing
     log_interval: int = 10  # Log every N epochs
     checkpoint_interval: int = 50  # Save checkpoint every N epochs
     enable_tensorboard: bool = True  # Enable TensorBoard logging
-    
+
     # Random seed
     seed: int = 42
-    
+
     # District IDs (empty = auto-detect from data_dir)
     district_ids: List[int] = field(default_factory=list)
-    
+
     def __post_init__(self):
         """Post-initialization validation and path conversion."""
         # Convert paths to Path objects
@@ -69,15 +69,15 @@ class GATConfig:
         self.checkpoint_dir = Path(self.checkpoint_dir)
         self.log_dir = Path(self.log_dir)
         self.output_dir = Path(self.output_dir)
-        
+
         if self.building_shapefile:
             self.building_shapefile = Path(self.building_shapefile)
-        
+
         # Create directories if they don't exist
         self.checkpoint_dir.mkdir(parents=True, exist_ok=True)
         self.log_dir.mkdir(parents=True, exist_ok=True)
         self.output_dir.mkdir(parents=True, exist_ok=True)
-        
+
         # Validate parameters
         assert self.hidden_dim > 0, "hidden_dim must be positive"
         assert self.num_layers >= 2, "num_layers must be at least 2"
@@ -87,7 +87,7 @@ class GATConfig:
         assert 0 < self.train_ratio < 1, "train_ratio must be in (0, 1)"
         assert self.epochs > 0, "epochs must be positive"
         assert self.batch_size > 0, "batch_size must be positive"
-    
+
     def to_dict(self) -> dict:
         """Convert config to dictionary."""
         return {
@@ -113,7 +113,7 @@ class GATConfig:
             'device': self.device,
             'seed': self.seed,
         }
-    
+
     def __repr__(self):
         return (
             f"GATConfig(\n"

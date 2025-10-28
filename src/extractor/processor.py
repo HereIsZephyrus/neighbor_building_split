@@ -6,7 +6,24 @@ def process_district(config, reader, rasterizer, district_row, idx, voronoi_gene
     """Process a district."""
     district_id = district_row.get("FID", idx)
     district_geom = district_row.geometry
-    logger.info("\nProcessing district %s", district_id)
+    
+    # Check if output files already exist and skip if so
+    if config.generate_voronoi_diagram:
+        # Check for Voronoi output files
+        voronoi_shp = config.voronoi_dir / f"district_{district_id}_voronoi.shp"
+        adjacency_pkl = config.voronoi_dir / f"district_{district_id}_adjacency.pkl"
+        if voronoi_shp.exists() and adjacency_pkl.exists():
+            logger.info("District %s already processed (outputs exist), skipping", district_id)
+            return
+    elif config.generate_raw_raster:
+        # Check for raster output file
+        raster_path = config.image_dir / f"district_{district_id}_raster.tif"
+        if raster_path.exists():
+            logger.info("District %s already processed (raster exists), skipping", district_id)
+            return
+    
+    logger.info("\nProcessing district %s (area: %.2f m²)", district_id, 
+               district_row.get('area', district_geom.area))
 
     # Get buildings in this district
     buildings = reader.get_buildings_in_district(district_geom)

@@ -28,7 +28,7 @@ def parse_args():
         description="Train GAT model for building clustering",
         formatter_class=argparse.ArgumentDefaultsHelpFormatter
     )
-    
+
     # Data arguments
     parser.add_argument(
         '--data-dir',
@@ -49,7 +49,7 @@ def parse_args():
         default=None,
         help='List of district IDs to train on (default: auto-detect)'
     )
-    
+
     # Model arguments
     parser.add_argument(
         '--hidden-dim',
@@ -75,7 +75,7 @@ def parse_args():
         default=0.6,
         help='Dropout rate'
     )
-    
+
     # Training arguments
     parser.add_argument(
         '--lr',
@@ -101,7 +101,7 @@ def parse_args():
         default=100,
         help='Early stopping patience'
     )
-    
+
     # Paths
     parser.add_argument(
         '--checkpoint-dir',
@@ -121,7 +121,7 @@ def parse_args():
         default='output/gat',
         help='Directory for output embeddings'
     )
-    
+
     # Config file
     parser.add_argument(
         '--config',
@@ -129,7 +129,7 @@ def parse_args():
         default=None,
         help='Path to config JSON file (overrides other arguments)'
     )
-    
+
     # Resume training
     parser.add_argument(
         '--resume',
@@ -137,7 +137,7 @@ def parse_args():
         default=None,
         help='Path to checkpoint to resume from'
     )
-    
+
     # Device
     parser.add_argument(
         '--device',
@@ -145,7 +145,7 @@ def parse_args():
         default='cuda' if torch.cuda.is_available() else 'cpu',
         help='Device to use (cuda or cpu)'
     )
-    
+
     # Other
     parser.add_argument(
         '--seed',
@@ -158,7 +158,7 @@ def parse_args():
         action='store_true',
         help='Disable TensorBoard logging'
     )
-    
+
     return parser.parse_args()
 
 
@@ -166,14 +166,14 @@ def load_config_from_file(config_path: str) -> GATConfig:
     """Load configuration from JSON file."""
     with open(config_path, 'r', encoding='utf-8') as f:
         config_dict = json.load(f)
-    
+
     return GATConfig(**config_dict)
 
 
 def auto_detect_district_ids(data_dir: Path) -> list:
     """Auto-detect district IDs from adjacency matrix files."""
     district_ids = []
-    
+
     for pkl_file in data_dir.glob('district_*_adjacency.pkl'):
         try:
             # Extract district ID from filename
@@ -181,7 +181,7 @@ def auto_detect_district_ids(data_dir: Path) -> list:
             district_ids.append(district_id)
         except (IndexError, ValueError):
             continue
-    
+
     district_ids.sort()
     return district_ids
 
@@ -189,7 +189,7 @@ def auto_detect_district_ids(data_dir: Path) -> list:
 def main():
     """Main training function."""
     args = parse_args()
-    
+
     # Load configuration
     if args.config:
         config = load_config_from_file(args.config)
@@ -215,36 +215,36 @@ def main():
             enable_tensorboard=not args.no_tensorboard,
             district_ids=args.district_ids or []
         )
-    
+
     # Validate required paths
     building_shapefile_path = Path(config.building_shapefile) if config.building_shapefile else None
     if not building_shapefile_path or not building_shapefile_path.exists():
         print("Error: Building shapefile path is required and must exist!")
         print("Use --building-shapefile to specify the path.")
         sys.exit(1)
-    
+
     if not config.data_dir.exists():
         print(f"Error: Data directory not found: {config.data_dir}")
         sys.exit(1)
-    
+
     # Setup logger
     log_file = config.log_dir / f"training_{datetime.now().strftime('%Y%m%d_%H%M%S')}.log"
     logger = setup_logger(name='gat', log_file=log_file)
-    
+
     logger.info("=" * 80)
     logger.info("GAT Training for Building Clustering")
     logger.info("=" * 80)
     logger.info("Configuration:\n%s", config)
-    
+
     # Auto-detect district IDs if not specified
     if not config.district_ids:
         config.district_ids = auto_detect_district_ids(config.data_dir)
         logger.info("Auto-detected %d districts: %s", len(config.district_ids), config.district_ids)
-    
+
     if len(config.district_ids) == 0:
         logger.error("No districts found! Please check data directory.")
         sys.exit(1)
-    
+
     # Load dataset
     logger.info("Loading dataset...")
     try:
@@ -254,26 +254,26 @@ def main():
             building_shapefile_path=str(config.building_shapefile),
             normalize_features=True
         )
-        
+
         logger.info("Dataset loaded: %d districts", len(dataset))
         stats = dataset.get_statistics()
         logger.info("Dataset statistics: %s", stats)
-        
+
         # Update num_classes in config
         config.num_classes = dataset.get_num_classes()
         logger.info("Number of classes: %d", config.num_classes)
-        
+
     except Exception as exc:
         logger.error("Failed to load dataset: %s", exc, exc_info=True)
         sys.exit(1)
-    
+
     # Split into train/val
     logger.info("Splitting dataset: %.0f%% train, %.0f%% val", config.train_ratio * 100, (1-config.train_ratio) * 100)
     data_list = [dataset.get(i) for i in range(len(dataset))]
     train_data, val_data = split_dataset(data_list, train_ratio=config.train_ratio, random_seed=config.seed)
-    
+
     logger.info("Train: %d districts, Val: %d districts", len(train_data), len(val_data))
-    
+
     # Initialize model
     logger.info("Initializing model...")
     model = GAT(
@@ -286,9 +286,9 @@ def main():
         negative_slope=config.negative_slope,
         add_self_loops=config.add_self_loops
     )
-    
+
     logger.info("Model:\n%s", model)
-    
+
     # Initialize trainer
     logger.info("Initializing trainer...")
     trainer = Trainer(
@@ -297,19 +297,19 @@ def main():
         train_data_list=train_data,
         val_data_list=val_data
     )
-    
+
     # Resume from checkpoint if specified
     if args.resume:
         logger.info("Resuming from checkpoint: %s", args.resume)
         trainer.resume_from_checkpoint(Path(args.resume))
-    
+
     # Train
     try:
         history = trainer.train()
-        
+
         logger.info("Training completed successfully!")
         logger.info("Best validation accuracy: %.4f", max(history.get('val_acc', [0])))
-        
+
     except KeyboardInterrupt:
         logger.info("Training interrupted by user")
         sys.exit(0)

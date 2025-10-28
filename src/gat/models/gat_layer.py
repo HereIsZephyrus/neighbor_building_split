@@ -18,21 +18,21 @@ logger = get_logger()
 class GATConv(nn.Module):
     """
     Graph Attention Convolutional Layer.
-    
+
     Implements multi-head attention mechanism following Veličković et al. (2018).
     This is a wrapper around PyG's GATConv for easier customization.
-    
+
     Attention mechanism:
         α_ij = softmax_j(LeakyReLU(a^T [W h_i || W h_j]))
         h'_i = σ(Σ_j α_ij W h_j)
-    
+
     where:
         - W is the learnable weight matrix
         - a is the attention mechanism weights
         - || denotes concatenation
         - σ is an activation function (ELU in our case)
     """
-    
+
     def __init__(
         self,
         in_channels: int,
@@ -47,7 +47,7 @@ class GATConv(nn.Module):
     ):
         """
         Initialize GAT convolutional layer.
-        
+
         Args:
             in_channels: Size of input features
             out_channels: Size of output features per head
@@ -61,13 +61,13 @@ class GATConv(nn.Module):
             **kwargs: Additional arguments for GATConv
         """
         super().__init__()
-        
+
         self.in_channels = in_channels
         self.out_channels = out_channels
         self.heads = heads
         self.concat = concat
         self.dropout = dropout
-        
+
         # Use PyG's GATConv implementation
         self.conv = PyGGATConv(
             in_channels=in_channels,
@@ -80,18 +80,18 @@ class GATConv(nn.Module):
             bias=bias,
             **kwargs
         )
-        
+
         # Output dimension
         if concat:
             self.output_dim = out_channels * heads
         else:
             self.output_dim = out_channels
-        
+
         logger.debug(
             f"Created GATConv layer: in={in_channels}, out={out_channels}, "
             f"heads={heads}, concat={concat}, output_dim={self.output_dim}"
         )
-    
+
     def forward(
         self,
         x: torch.Tensor,
@@ -101,13 +101,13 @@ class GATConv(nn.Module):
     ):
         """
         Forward pass.
-        
+
         Args:
             x: Node features (N, in_channels)
             edge_index: Edge indices (2, E)
             edge_attr: Optional edge attributes (E,) - currently not used by GATConv
             return_attention_weights: Whether to return attention weights
-            
+
         Returns:
             out: Output node features (N, output_dim)
             attention_weights: Optional (edge_index, attention) tuple
@@ -121,7 +121,7 @@ class GATConv(nn.Module):
         else:
             out = self.conv(x, edge_index)
             return out
-    
+
     def __repr__(self):
         return (
             f'{self.__class__.__name__}('

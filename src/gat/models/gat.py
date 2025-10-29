@@ -124,7 +124,7 @@ class GAT(nn.Module):
         # Pooling increases dimension (mean_max doubles it)
         pool_multiplier = 2 if pooling == 'mean_max' else 1
         cluster_input_dim = self.embedding_dim * pool_multiplier
-        
+
         self.cluster_predictor = nn.Sequential(
             nn.Linear(cluster_input_dim, 128),
             nn.ReLU(),
@@ -181,7 +181,7 @@ class GAT(nn.Module):
         # Graph-level pooling for cluster prediction
         graph_embedding = global_pool(embeddings, method=self.pooling)
         num_clusters_pred = self.cluster_predictor(graph_embedding)
-        
+
         # Clamp prediction to valid range
         num_clusters_pred = torch.clamp(num_clusters_pred, min=self.min_clusters, max=self.max_clusters)
 
@@ -211,7 +211,7 @@ class GAT(nn.Module):
         """
         _, embeddings = self.forward(x, edge_index, edge_attr, return_embeddings=True)
         return embeddings
-    
+
     def forward_inference(
         self,
         x: torch.Tensor,

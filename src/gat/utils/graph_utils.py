@@ -230,11 +230,11 @@ def get_connected_components(edge_index: torch.Tensor, num_nodes: int) -> Tuple[
 def global_pool(x: torch.Tensor, method: str = 'mean_max') -> torch.Tensor:
     """
     Global pooling over all nodes in a graph.
-    
+
     Args:
         x: Node features tensor of shape (N, D)
         method: Pooling method - 'mean', 'max', or 'mean_max' (concatenation)
-    
+
     Returns:
         Graph-level feature vector of shape (1, D) or (1, 2*D) for mean_max
     """

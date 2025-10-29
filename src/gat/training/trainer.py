@@ -166,10 +166,10 @@ class Trainer:
                         node_logits[:batch.batch_size], 
                         batch.y[:batch.batch_size]
                     )
-                    
+
                     # Cluster loss uses full graph
                     cluster_loss = self.cluster_criterion(cluster_pred, data.num_clusters)
-                    
+
                     # Combined loss
                     loss = (self.config.lambda_node * node_loss + 
                            self.config.lambda_cluster * cluster_loss)
@@ -191,7 +191,7 @@ class Trainer:
                         total_loss += loss.item() * batch.batch_size
                         total_node_loss += node_loss.item() * batch.batch_size
                         total_cluster_loss += cluster_loss.item()
-                
+
                 # Track cluster MAE per graph (after all batches)
                 with torch.no_grad():
                     _, _, cluster_pred = self.model(data.x, data.edge_index, return_all=True)
@@ -216,7 +216,7 @@ class Trainer:
                 # Compute losses
                 node_loss = self.criterion(node_logits, data.y)
                 cluster_loss = self.cluster_criterion(cluster_pred, data.num_clusters)
-                
+
                 # Combined loss
                 loss = (self.config.lambda_node * node_loss + 
                        self.config.lambda_cluster * cluster_loss)
@@ -230,7 +230,7 @@ class Trainer:
                     pred = node_logits.argmax(dim=1)
                     correct = (pred == data.y).sum().item()
                     cluster_mae = torch.abs(cluster_pred - data.num_clusters).item()
-                    
+
                     total_correct += correct
                     total_samples += data.num_nodes
                     total_loss += loss.item() * data.num_nodes
@@ -288,7 +288,7 @@ class Trainer:
             # Compute losses
             node_loss = self.criterion(node_logits, data.y)
             cluster_loss = self.cluster_criterion(cluster_pred, data.num_clusters)
-            
+
             # Combined loss
             loss = (self.config.lambda_node * node_loss + 
                    self.config.lambda_cluster * cluster_loss)

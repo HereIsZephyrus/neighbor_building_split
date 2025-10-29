@@ -139,23 +139,23 @@ class GATConfig:
     def from_yaml(cls, yaml_path: Path, override_paths: Dict[str, Any] = None) -> 'GATConfig':
         """
         Load configuration from YAML file.
-        
+
         Args:
             yaml_path: Path to YAML configuration file
             override_paths: Dictionary to override path parameters (data_dir, building_shapefile, output_dir)
-        
+
         Returns:
             GATConfig instance
         """
         with open(yaml_path, 'r', encoding='utf-8') as f:
             config_dict = yaml.safe_load(f)
-        
+
         # Extract parameters from nested structure
         model_params = config_dict.get('model', {})
         training_params = config_dict.get('training', {})
         data_params = config_dict.get('data', {})
         logging_params = config_dict.get('logging', {})
-        
+
         # Build flat parameter dict
         params = {
             # Model parameters
@@ -170,7 +170,7 @@ class GATConfig:
             'pooling': model_params.get('pooling', 'mean_max'),
             'min_clusters': model_params.get('min_clusters', 2),
             'max_clusters': model_params.get('max_clusters', 10),
-            
+
             # Training parameters
             'lr': training_params.get('lr', 5e-3),
             'weight_decay': training_params.get('weight_decay', 5e-4),
@@ -186,33 +186,33 @@ class GATConfig:
             'gradient_accumulation_steps': training_params.get('gradient_accumulation_steps', 1),
             'lambda_node': training_params.get('lambda_node', 1.0),
             'lambda_cluster': training_params.get('lambda_cluster', 1.0),
-            
+
             # Data parameters
             'district_ids': data_params.get('district_ids', []),
-            
+
             # Logging parameters
             'log_interval': logging_params.get('log_interval', 10),
             'checkpoint_interval': logging_params.get('checkpoint_interval', 50),
             'enable_tensorboard': logging_params.get('enable_tensorboard', True),
-            
+
             # Other parameters
             'seed': config_dict.get('seed', 42),
             'device': config_dict.get('device', 'cuda' if torch.cuda.is_available() else 'cpu'),
-            
+
             # Path parameters (will be overridden by command line)
             'data_dir': 'output/voronoi',
             'building_shapefile': '',
             'output_dir': 'output/gat',
         }
-        
+
         # Override with command line path arguments
         if override_paths:
             params.update(override_paths)
-        
+
         # Construct output subdirectories based on output_dir
         output_dir = Path(params['output_dir'])
         params['checkpoint_dir'] = str(output_dir / 'checkpoints')
         params['log_dir'] = str(output_dir / 'logs')
-        
+
         return cls(**params)
 

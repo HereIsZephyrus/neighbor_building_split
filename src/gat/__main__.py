@@ -12,7 +12,7 @@ from datetime import datetime
 
 from .training import GATConfig, Trainer
 from .models.gat import GAT
-from .data import BuildingGraphDataset, BuildingDataset, split_dataset
+from .data import BuildingGraphDataset, BuildingDataset, DistrictDataset, split_dataset
 from .utils import setup_logger
 
 
@@ -25,7 +25,7 @@ def parse_args():
 
     # Required path arguments
     parser.add_argument(
-        '--data-dir',
+        '--adjacency-dir',
         type=str,
         required=True,
         help='Directory containing adjacency matrices (pkl files)'
@@ -37,7 +37,13 @@ def parse_args():
         help='Path to building shapefile'
     )
     parser.add_argument(
-        '--output-dir',
+        '--sample-districts',
+        type=str,
+        required=True,
+        help='Path to building shapefile'
+    )
+    parser.add_argument(
+        '--output-root-dir',
         type=str,
         required=True,
         help='Directory for all outputs (checkpoints, logs, embeddings)'
@@ -89,37 +95,37 @@ def main():
         sys.exit(1)
 
     # Load configuration from YAML
-    override_paths = {
-        'data_dir': args.data_dir,
-        'building_shapefile': args.sample_buildings,
-        'output_dir': args.output_dir,
+    resource_path = {
+        'building_path': args.sample_buildings,
+        'district_path': args.sample_districts,
+        'adjacency_dir': args.adjacency_dir,
+        'output_root_dir': args.output_root_dir,
     }
-    config = GATConfig.from_yaml(config_path, override_paths=override_paths)
-    print(f"✓ Loaded configuration from {config_path}")
+    config = GATConfig.from_yaml(config_path, resource_path=resource_path)
+    print(f"Loaded configuration from {config_path}")
 
-    # Validate required paths
-    data_dir = Path(config.data_dir)
-    building_shapefile_path = Path(config.building_shapefile)
-    output_dir = Path(config.output_dir)
-
-    if not data_dir.exists():
-        print(f"✗ Error: Data directory not found: {data_dir}")
+    if not Path(config.adjacency_dir).exists():
+        print(f"Error: Data directory not found: {config.adjacency_dir}")
         sys.exit(1)
 
-    if not building_shapefile_path.exists():
-        print(f"✗ Error: Building shapefile not found: {building_shapefile_path}")
+    if not Path(config.building_path).exists():
+        print(f"Error: Building shapefile not found: {config.building_path}")
+        sys.exit(1)
+
+    if not Path(config.district_path).exists():
+        print(f"Error: District shapefile not found: {config.district_path}")
         sys.exit(1)
 
     # Create output directory structure
-    output_dir.mkdir(parents=True, exist_ok=True)
-    building_dataset = BuildingDataset(building_shapefile_path)
-    print(f"✓ Output directory: {output_dir}")
+    building_dataset = BuildingDataset(config.building_path)
+    district_dataset = DistrictDataset(config.district_path)
+    print(f"Output directory: {config.output_root_dir}")
     print(f"  - Checkpoints: {config.checkpoint_dir}")
     print(f"  - Logs: {config.log_dir}")
     print(f"  - Embeddings: {config.output_dir}")
 
     # Setup logger
-    log_file = config.log_dir / f"training_{datetime.now().strftime('%Y%m%d_%H%M%S')}.log"
+    log_file = Path(config.log_dir) / f"training_{datetime.now().strftime('%Y%m%d_%H%M%S')}.log"
     logger = setup_logger(name='gat', log_file=log_file)
 
     logger.info("=" * 80)
@@ -131,8 +137,10 @@ def main():
     logger.info("Loading dataset...")
     try:
         dataset = BuildingGraphDataset(
-            district_folder=data_dir,
-            building_dataset=building_dataset
+            adjacency_dir=config.adjacency_dir,
+            district_dataset=district_dataset,
+            building_dataset=building_dataset,
+            dataset_dir=f"{config.output_root_dir}/dataset",
         )
 
         logger.info("Dataset loaded: %d districts", len(dataset))

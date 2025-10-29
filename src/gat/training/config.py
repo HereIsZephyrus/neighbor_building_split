@@ -45,12 +45,16 @@ class GATConfig:
     train_ratio: float = 0.8  # Train/val split ratio
     num_workers: int = 0  # DataLoader workers (0 for debugging, 4+ for speed)
 
-    # Paths
-    data_dir: str = "output/voronoi"  # Directory with adjacency matrices
-    building_shapefile: str = ""  # Path to building shapefile (required)
-    checkpoint_dir: str = "models/gat"  # Model checkpoints
-    log_dir: str = "runs/gat"  # TensorBoard logs
-    output_dir: str = "output/gat"  # Output embeddings
+    # resource paths
+    adjacency_dir: str = ""
+    building_path: str = ""
+    district_path: str = ""
+    output_root_dir: str = ""
+
+    # subdirectories Path
+    checkpoint_dir: str = "models"  # Model checkpoints
+    log_dir: str = "runs"  # TensorBoard logs
+    output_dir: str = "output"  # Output embeddings
 
     # Device and optimization
     device: str = field(default_factory=lambda: "cuda" if torch.cuda.is_available() else "cpu")
@@ -70,15 +74,6 @@ class GATConfig:
 
     def __post_init__(self):
         """Post-initialization validation and path conversion."""
-        # Convert paths to Path objects
-        self.data_dir = Path(self.data_dir)
-        self.output_dir = Path(self.output_dir)
-        self.checkpoint_dir = Path(self.checkpoint_dir)
-        self.log_dir = Path(self.log_dir)
-
-        if self.building_shapefile:
-            self.building_shapefile = Path(self.building_shapefile)
-
         # Create directories if they don't exist
         Path(self.checkpoint_dir).mkdir(parents=True, exist_ok=True)
         Path(self.log_dir).mkdir(parents=True, exist_ok=True)
@@ -131,18 +126,18 @@ class GATConfig:
             f"  Model: {self.num_layers} layers, hidden={self.hidden_dim}, heads={self.num_heads}\n"
             f"  Training: lr={self.lr}, epochs={self.epochs}, batch_size={self.batch_size}\n"
             f"  Device: {self.device}\n"
-            f"  Data: {self.data_dir}\n"
+            f"  Data: {self.adjacency_dir}\n"
             f")"
         )
 
     @classmethod
-    def from_yaml(cls, yaml_path: Path, override_paths: Dict[str, Any] = None) -> 'GATConfig':
+    def from_yaml(cls, yaml_path: Path, resource_path: Dict[str, Any]) -> 'GATConfig':
         """
         Load configuration from YAML file.
 
         Args:
             yaml_path: Path to YAML configuration file
-            override_paths: Dictionary to override path parameters (data_dir, building_shapefile, output_dir)
+            resource_path: Dictionary containing resource paths (adjacency_dir, building_shapefile, etc.)
 
         Returns:
             GATConfig instance
@@ -198,21 +193,13 @@ class GATConfig:
             # Other parameters
             'seed': config_dict.get('seed', 42),
             'device': config_dict.get('device', 'cuda' if torch.cuda.is_available() else 'cpu'),
-
-            # Path parameters (will be overridden by command line)
-            'data_dir': 'output/voronoi',
-            'building_shapefile': '',
-            'output_dir': 'output/gat',
         }
 
-        # Override with command line path arguments
-        if override_paths:
-            params.update(override_paths)
+        # Add resource paths directly
+        params.update(resource_path)
 
         # Construct output subdirectories based on output_dir
-        output_dir = Path(params['output_dir'])
-        params['checkpoint_dir'] = str(output_dir / 'checkpoints')
-        params['log_dir'] = str(output_dir / 'logs')
-
+        params['checkpoint_dir'] = f"{params['output_root_dir']}/checkpoints"
+        params['log_dir'] = f"{params['output_root_dir']}/logs"
+        params['output_dir'] = f"{params['output_root_dir']}/output"
         return cls(**params)
-

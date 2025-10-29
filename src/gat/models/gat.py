@@ -33,15 +33,12 @@ class GAT(nn.Module):
         self,
         in_features: int = 12,
         hidden_dim: int = 64,
-        num_classes: int = 3,
+        num_classes: int = 8,
         num_layers: int = 3,
         num_heads: int = 8,
         dropout: float = 0.6,
         negative_slope: float = 0.2,
-        add_self_loops: bool = True,
-        pooling: str = 'mean_max',
-        min_clusters: int = 2,
-        max_clusters: int = 10
+        add_self_loops: bool = True
     ):
         """
         Initialize GAT model.
@@ -49,15 +46,12 @@ class GAT(nn.Module):
         Args:
             in_features: Number of input features per node
             hidden_dim: Hidden dimension per attention head
-            num_classes: Number of output classes
+            num_classes: Number of output classes (building categories)
             num_layers: Number of GAT layers (default: 3)
             num_heads: Number of attention heads in hidden layers
             dropout: Dropout rate (applied to features and attention)
             negative_slope: LeakyReLU negative slope for attention
             add_self_loops: Whether to add self-loops
-            pooling: Graph pooling method for cluster prediction
-            min_clusters: Minimum expected number of clusters
-            max_clusters: Maximum expected number of clusters
         """
         super().__init__()
 
@@ -67,9 +61,6 @@ class GAT(nn.Module):
         self.num_layers = num_layers
         self.num_heads = num_heads
         self.dropout = dropout
-        self.pooling = pooling
-        self.min_clusters = min_clusters
-        self.max_clusters = max_clusters
 
         assert num_layers >= 2, "GAT requires at least 2 layers"
 
@@ -117,24 +108,12 @@ class GAT(nn.Module):
             )
         )
 
-        # Embedding dimension (for downstream clustering)
+        # Embedding dimension (for downstream tasks)
         self.embedding_dim = hidden_dim * num_heads
 
-        # Cluster prediction head
-        # Pooling increases dimension (mean_max doubles it)
-        pool_multiplier = 2 if pooling == 'mean_max' else 1
-        cluster_input_dim = self.embedding_dim * pool_multiplier
-
-        self.cluster_predictor = nn.Sequential(
-            nn.Linear(cluster_input_dim, 128),
-            nn.ReLU(),
-            nn.Dropout(dropout),
-            nn.Linear(128, 1)  # Regression output
-        )
-
         logger.info(
-            "Initialized GAT: layers=%d, hidden_dim=%d, heads=%d, classes=%d, dropout=%.2f, embedding_dim=%d, pooling=%s",
-            num_layers, hidden_dim, num_heads, num_classes, dropout, self.embedding_dim, pooling
+            "Initialized GAT: layers=%d, hidden_dim=%d, heads=%d, classes=%d, dropout=%.2f, embedding_dim=%d",
+            num_layers, hidden_dim, num_heads, num_classes, dropout, self.embedding_dim
         )
 
     def forward(

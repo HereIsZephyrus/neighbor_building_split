@@ -32,8 +32,9 @@ model:
 # =============================================================================
 training:
   # 学习率
-  # 5e-3对于Adam优化器和小图效果较好
-  lr: 0.005
+  # 降低学习率以提高训练稳定性（避免NaN）
+  # 原始值0.005可能过大，建议从0.001或0.0005开始
+  lr: 0.001
 
   # L2正则化系数
   weight_decay: 0.0005
@@ -73,9 +74,11 @@ training:
 
   # Spatial smoothness regularization
   # Weight for smoothness loss (encourages neighboring buildings to have same class)
-  lambda_smooth: 0.5  # Recommended range: 0.1-2.0
+  # 降低权重以提高稳定性，可以在训练稳定后逐渐增加
+  lambda_smooth: 0.1  # Recommended range: 0.05-2.0 (start small)
 
   # Temperature for softmax in smoothness loss (lower = stricter constraint)
+  # 较高的温度(>1.0)可以提高数值稳定性
   smooth_temperature: 1.0
 
 # =============================================================================

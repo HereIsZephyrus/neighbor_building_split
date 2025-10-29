@@ -95,7 +95,7 @@ def load_district_graph(
     # Convert similarity matrix to edge_index
     edge_index, edge_attr = similarity_matrix_to_edge_index(sim_matrix, threshold=None)
 
-    # Extract labels if available
+    # Extract labels if available (convert from 1-based to 0-based indexing)
     label_field = None
     for possible_label in ['label', 'class', 'category', 'cluster', 'type']:
         if possible_label in buildings_gdf.columns:
@@ -103,13 +103,10 @@ def load_district_graph(
             break
 
     if label_field is not None:
-        labels = buildings_gdf[label_field].values
-        # Convert to integer labels
-        unique_labels = np.unique(labels)
-        label_map = {label: idx for idx, label in enumerate(unique_labels)}
-        y = torch.tensor([label_map[label] for label in labels], dtype=torch.long)
-        num_clusters = len(unique_labels)
-        logger.debug(f"Found labels: {num_clusters} classes")
+        labels = buildings_gdf[label_field].values - 1  # Convert 1-based to 0-based
+        y = torch.tensor(labels, dtype=torch.long)
+        num_clusters = len(np.unique(labels))
+        logger.debug(f"Found labels: {num_clusters} classes (converted from 1-based to 0-based)")
     else:
         # No labels available
         y = torch.zeros(len(buildings_gdf), dtype=torch.long)

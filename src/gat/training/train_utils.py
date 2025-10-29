@@ -301,4 +301,3 @@ class EarlyStopping:
             return score > self.best_score
         else:
             return score < self.best_score
-

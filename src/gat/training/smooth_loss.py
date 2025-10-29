@@ -63,14 +63,15 @@ def edge_smoothness_loss(
 
     # Compute softmax probability distributions for source and target nodes
     # Using temperature scaling: lower temperature → sharper distributions
-    src_probs = F.softmax(logits[src_idx] / temperature, dim=-1)
+    # Use log_softmax for numerical stability (avoids log(0) = -inf)
+    src_log_probs = F.log_softmax(logits[src_idx] / temperature, dim=-1)
     dst_probs = F.softmax(logits[dst_idx] / temperature, dim=-1)
 
     # Compute KL divergence between source and target distributions
     # KL(src || dst) measures how different the two distributions are
-    # We use log_softmax on source for numerical stability
+    # F.kl_div expects log probabilities as first argument and probabilities as second
     kl_div = F.kl_div(
-        src_probs.log(),
+        src_log_probs,
         dst_probs,
         reduction='none'
     ).sum(dim=-1)

@@ -146,9 +146,9 @@ class BuildingGraphDataset(Dataset):
         features_normalized = self.scaler.transform(features)
         x = torch.tensor(features_normalized, dtype=torch.float)
 
-        # Extract labels
+        # Extract labels (convert from 1-based to 0-based indexing)
         if 'label' in buildings_df.columns:
-            labels = buildings_df['label'].values
+            labels = buildings_df['label'].values - 1  # Convert 1-based to 0-based
             y = torch.tensor(labels, dtype=torch.long)
         else:
             # If no labels, use zeros

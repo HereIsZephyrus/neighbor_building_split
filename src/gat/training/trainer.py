@@ -3,13 +3,15 @@
 Following pytorch-GAT training script structure.
 """
 
+from typing import List, Optional, Dict
+from pathlib import Path
 import torch
 import torch.nn as nn
 from torch.optim import Adam
 from torch.optim.lr_scheduler import ReduceLROnPlateau
 from torch_geometric.data import Data
-from typing import List, Optional, Dict
-from pathlib import Path
+
+from torch.utils.tensorboard import SummaryWriter
 
 from ..models.gat import GAT
 from ..data.graph_batch_sampler import create_neighbor_loader, should_use_neighbor_sampling
@@ -94,7 +96,6 @@ class Trainer:
         # TensorBoard writer
         self.writer = None
         if config.enable_tensorboard:
-            from torch.utils.tensorboard import SummaryWriter
             self.writer = SummaryWriter(log_dir=str(config.log_dir))
             logger.info(f"TensorBoard logging to {config.log_dir}")
 
@@ -184,6 +185,12 @@ class Trainer:
 
                     # Metrics
                     with torch.no_grad():
+                        # Check for NaN in loss
+                        if torch.isnan(loss) or torch.isinf(loss):
+                            logger.error(f"NaN/Inf detected in loss! cls_loss={loss_cls.item()}, smooth_loss={loss_smooth.item()}")
+                            logger.error("This may be caused by: 1) learning rate too high, 2) gradient explosion, 3) numerical instability")
+                            raise ValueError("Training stopped due to NaN/Inf in loss")
+
                         pred = node_logits[:batch.batch_size].argmax(dim=1)
                         correct = (pred == batch.y[:batch.batch_size]).sum().item()
                         total_correct += correct
@@ -225,6 +232,12 @@ class Trainer:
 
                 # Metrics
                 with torch.no_grad():
+                    # Check for NaN in loss
+                    if torch.isnan(loss) or torch.isinf(loss):
+                        logger.error(f"NaN/Inf detected in loss! cls_loss={loss_cls.item()}, smooth_loss={loss_smooth.item()}")
+                        logger.error("This may be caused by: 1) learning rate too high, 2) gradient explosion, 3) numerical instability")
+                        raise ValueError("Training stopped due to NaN/Inf in loss")
+
                     pred = node_logits.argmax(dim=1)
                     correct = (pred == data.y).sum().item()
 
@@ -384,7 +397,7 @@ class Trainer:
                 is_best = True
 
             if epoch % self.config.checkpoint_interval == 0 or is_best:
-                checkpoint_path = self.config.checkpoint_dir / f'checkpoint_epoch_{epoch}.pth'
+                checkpoint_path = Path(self.config.checkpoint_dir) / f'checkpoint_epoch_{epoch}.pth'
                 save_checkpoint(
                     self.model,
                     self.optimizer,
@@ -403,7 +416,7 @@ class Trainer:
                     break
 
         # Save final checkpoint
-        final_checkpoint_path = self.config.checkpoint_dir / 'final_model.pth'
+        final_checkpoint_path = Path(self.config.checkpoint_dir) / 'final_model.pth'
         save_checkpoint(
             self.model,
             self.optimizer,
@@ -415,7 +428,7 @@ class Trainer:
         )
 
         # Save training history
-        history_path = self.config.checkpoint_dir / 'training_history.json'
+        history_path = Path(self.config.checkpoint_dir) / 'training_history.json'
         save_training_history(self.history, history_path)
 
         # Close TensorBoard writer

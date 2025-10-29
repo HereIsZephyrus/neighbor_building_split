@@ -11,6 +11,7 @@ from typing import Optional, Tuple
 
 from .gat_layer import GATConv
 from ..utils.logger import get_logger
+from ..utils.graph_utils import global_pool
 
 logger = get_logger()
 
@@ -37,7 +38,10 @@ class GAT(nn.Module):
         num_heads: int = 8,
         dropout: float = 0.6,
         negative_slope: float = 0.2,
-        add_self_loops: bool = True
+        add_self_loops: bool = True,
+        pooling: str = 'mean_max',
+        min_clusters: int = 2,
+        max_clusters: int = 10
     ):
         """
         Initialize GAT model.
@@ -51,6 +55,9 @@ class GAT(nn.Module):
             dropout: Dropout rate (applied to features and attention)
             negative_slope: LeakyReLU negative slope for attention
             add_self_loops: Whether to add self-loops
+            pooling: Graph pooling method for cluster prediction
+            min_clusters: Minimum expected number of clusters
+            max_clusters: Maximum expected number of clusters
         """
         super().__init__()
 
@@ -60,6 +67,9 @@ class GAT(nn.Module):
         self.num_layers = num_layers
         self.num_heads = num_heads
         self.dropout = dropout
+        self.pooling = pooling
+        self.min_clusters = min_clusters
+        self.max_clusters = max_clusters
 
         assert num_layers >= 2, "GAT requires at least 2 layers"
 
@@ -110,9 +120,21 @@ class GAT(nn.Module):
         # Embedding dimension (for downstream clustering)
         self.embedding_dim = hidden_dim * num_heads
 
+        # Cluster prediction head
+        # Pooling increases dimension (mean_max doubles it)
+        pool_multiplier = 2 if pooling == 'mean_max' else 1
+        cluster_input_dim = self.embedding_dim * pool_multiplier
+        
+        self.cluster_predictor = nn.Sequential(
+            nn.Linear(cluster_input_dim, 128),
+            nn.ReLU(),
+            nn.Dropout(dropout),
+            nn.Linear(128, 1)  # Regression output
+        )
+
         logger.info(
-            "Initialized GAT: layers=%d, hidden_dim=%d, heads=%d, classes=%d, dropout=%.2f, embedding_dim=%d",
-            num_layers, hidden_dim, num_heads, num_classes, dropout, self.embedding_dim
+            "Initialized GAT: layers=%d, hidden_dim=%d, heads=%d, classes=%d, dropout=%.2f, embedding_dim=%d, pooling=%s",
+            num_layers, hidden_dim, num_heads, num_classes, dropout, self.embedding_dim, pooling
         )
 
     def forward(
@@ -120,7 +142,8 @@ class GAT(nn.Module):
         x: torch.Tensor,
         edge_index: torch.Tensor,
         edge_attr: Optional[torch.Tensor] = None,
-        return_embeddings: bool = False
+        return_embeddings: bool = False,
+        return_all: bool = False
     ) -> torch.Tensor:
         """
         Forward pass through GAT.
@@ -130,12 +153,15 @@ class GAT(nn.Module):
             edge_index: Edge indices (2, E)
             edge_attr: Optional edge attributes (E,) - not used currently
             return_embeddings: If True, return penultimate layer embeddings
+            return_all: If True, return (logits, embeddings, num_clusters_pred)
 
         Returns:
-            If return_embeddings=False:
-                logits: Output class logits (N, num_classes)
+            If return_all=True:
+                (node_logits, embeddings, num_clusters_pred)
             If return_embeddings=True:
-                (logits, embeddings) where embeddings is (N, embedding_dim)
+                (logits, embeddings)
+            Otherwise:
+                logits: Output class logits (N, num_classes)
         """
         # Input dropout
         x = F.dropout(x, p=self.dropout, training=self.training)
@@ -149,13 +175,22 @@ class GAT(nn.Module):
         # Save embeddings before final layer
         embeddings = x
 
-        # Final layer (no activation, no dropout after)
-        x = self.convs[-1](x, edge_index, edge_attr)
+        # Final layer for node classification (no activation, no dropout after)
+        node_logits = self.convs[-1](x, edge_index, edge_attr)
 
-        if return_embeddings:
-            return x, embeddings
+        # Graph-level pooling for cluster prediction
+        graph_embedding = global_pool(embeddings, method=self.pooling)
+        num_clusters_pred = self.cluster_predictor(graph_embedding)
+        
+        # Clamp prediction to valid range
+        num_clusters_pred = torch.clamp(num_clusters_pred, min=self.min_clusters, max=self.max_clusters)
+
+        if return_all:
+            return node_logits, embeddings, num_clusters_pred
+        elif return_embeddings:
+            return node_logits, embeddings
         else:
-            return x
+            return node_logits
 
     def get_embeddings(
         self,
@@ -176,6 +211,29 @@ class GAT(nn.Module):
         """
         _, embeddings = self.forward(x, edge_index, edge_attr, return_embeddings=True)
         return embeddings
+    
+    def forward_inference(
+        self,
+        x: torch.Tensor,
+        edge_index: torch.Tensor,
+        edge_attr: Optional[torch.Tensor] = None
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        """
+        Forward pass for inference: returns embeddings and predicted cluster count.
+
+        Args:
+            x: Node features (N, in_features)
+            edge_index: Edge indices (2, E)
+            edge_attr: Optional edge attributes (E,)
+
+        Returns:
+            embeddings: Node embeddings (N, embedding_dim)
+            num_clusters_pred: Predicted number of clusters (1, 1)
+        """
+        _, embeddings, num_clusters_pred = self.forward(
+            x, edge_index, edge_attr, return_all=True
+        )
+        return embeddings, num_clusters_pred
 
     def get_attention_weights(
         self,
@@ -226,7 +284,9 @@ class GAT(nn.Module):
             f'  num_layers={self.num_layers},\n'
             f'  num_heads={self.num_heads},\n'
             f'  dropout={self.dropout},\n'
-            f'  embedding_dim={self.embedding_dim}\n'
+            f'  embedding_dim={self.embedding_dim},\n'
+            f'  pooling={self.pooling},\n'
+            f'  cluster_range=[{self.min_clusters}, {self.max_clusters}]\n'
             f')'
         )
 

@@ -170,7 +170,7 @@ def main():
         if rank == 0:
             logger.info("Sorted %d districts by area (min: %.2f m², max: %.2f m²)", 
                        len(districts), districts['area'].min(), districts['area'].max())
-    
+
     if rank == 0:
         logger.info("Processing %d districts...", len(districts))
 

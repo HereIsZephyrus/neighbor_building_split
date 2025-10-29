@@ -7,7 +7,7 @@ Usage:
 import argparse
 import sys
 from pathlib import Path
-from typing import Dict, List
+from typing import List
 import pickle
 
 import torch
@@ -15,8 +15,6 @@ import numpy as np
 from tqdm import tqdm
 
 from .models.gat import GAT
-from .training.config import GATConfig
-from .training.train_utils import load_checkpoint
 from .data.data_utils import load_district_graph
 from .utils.logger import setup_logger, get_logger
 
@@ -122,7 +120,10 @@ def load_model_from_checkpoint(checkpoint_path: Path, device: str) -> tuple:
         num_heads=model_config.get('num_heads', 8),
         dropout=model_config.get('dropout', 0.6),
         negative_slope=model_config.get('negative_slope', 0.2),
-        add_self_loops=model_config.get('add_self_loops', True)
+        add_self_loops=model_config.get('add_self_loops', True),
+        pooling=model_config.get('pooling', 'mean_max'),
+        min_clusters=model_config.get('min_clusters', 2),
+        max_clusters=model_config.get('max_clusters', 10)
     )
 
     # Load state dict
@@ -173,31 +174,35 @@ def generate_embeddings_for_district(
         # Move to device
         data = data.to(device)
 
-        # Generate embeddings
+        # Generate embeddings and predict cluster count
         with torch.no_grad():
-            embeddings = model.get_embeddings(data.x, data.edge_index)
+            embeddings, num_clusters_pred = model.forward_inference(data.x, data.edge_index)
 
         # Convert to numpy
         embeddings_np = embeddings.cpu().numpy()
         labels_np = data.y.cpu().numpy()
+        num_clusters_pred_val = int(torch.round(num_clusters_pred).item())
+        true_num_clusters = int(data.num_clusters.item()) if hasattr(data, 'num_clusters') else None
 
         logger.info(
             f"Generated embeddings for district {district_id}: "
-            f"shape={embeddings_np.shape}, labels={len(np.unique(labels_np))} classes"
+            f"shape={embeddings_np.shape}, labels={len(np.unique(labels_np))} classes, "
+            f"predicted_clusters={num_clusters_pred_val}, true_clusters={true_num_clusters}"
         )
 
-        return embeddings_np, labels_np, data.num_nodes, scaler
+        return embeddings_np, labels_np, data.num_nodes, num_clusters_pred_val, scaler
 
     except Exception as e:
         logger.error(f"Failed to generate embeddings for district {district_id}: {e}")
-        return None, None, 0, scaler
+        return None, None, 0, None, scaler
 
 
 def save_embeddings(
     embeddings: np.ndarray,
     labels: np.ndarray,
     district_id: int,
-    output_dir: Path
+    output_dir: Path,
+    predicted_num_clusters: int = None
 ) -> None:
     """
     Save embeddings to pickle file.
@@ -207,6 +212,7 @@ def save_embeddings(
         labels: Node labels (N,)
         district_id: District ID
         output_dir: Output directory
+        predicted_num_clusters: Predicted number of clusters
     """
     output_dir.mkdir(parents=True, exist_ok=True)
 
@@ -217,7 +223,8 @@ def save_embeddings(
         'labels': labels,
         'district_id': district_id,
         'num_nodes': len(embeddings),
-        'embedding_dim': embeddings.shape[1]
+        'embedding_dim': embeddings.shape[1],
+        'predicted_num_clusters': predicted_num_clusters
     }
 
     with open(output_file, 'wb') as f:
@@ -266,11 +273,7 @@ def main():
     # Load model
     model, config = load_model_from_checkpoint(checkpoint_path, args.device)
 
-    # Get district IDs
-    if args.district_ids:
-        district_ids = args.district_ids
-    else:
-        district_ids = auto_detect_district_ids(data_dir)
+    district_ids = get_building_district_ids(building_shapefile)
 
     logger.info(f"Processing {len(district_ids)} districts: {district_ids}")
 
@@ -279,7 +282,7 @@ def main():
     scaler = None  # Will be fitted on first district, then reused
 
     for district_id in tqdm(district_ids, desc="Generating embeddings"):
-        embeddings, labels, num_nodes, scaler = generate_embeddings_for_district(
+        embeddings, labels, num_nodes, predicted_num_clusters, scaler = generate_embeddings_for_district(
             model=model,
             district_id=district_id,
             data_dir=data_dir,
@@ -290,12 +293,13 @@ def main():
 
         if embeddings is not None:
             # Save embeddings
-            save_embeddings(embeddings, labels, district_id, output_dir)
+            save_embeddings(embeddings, labels, district_id, output_dir, predicted_num_clusters)
 
             all_embeddings[district_id] = {
                 'embeddings': embeddings,
                 'labels': labels,
-                'num_nodes': num_nodes
+                'num_nodes': num_nodes,
+                'predicted_num_clusters': predicted_num_clusters
             }
 
     # Save summary

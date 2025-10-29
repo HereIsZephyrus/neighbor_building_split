@@ -1,25 +1,19 @@
 """Main entry point for GAT training.
 
 Usage:
-    python -m src.gat --data-dir output/voronoi --building-shapefile path/to/buildings.shp
-    python -m src.gat --config config.json
-    python -m src.gat --resume models/gat/checkpoint_epoch_100.pth
+    python -m src.gat --data-dir /path/to/voronoi --sample-buildings /path/to/buildings.shp --output-dir /path/to/output
+    python -m src.gat --data-dir /path/to/voronoi --sample-buildings /path/to/buildings.shp --output-dir /path/to/output --config custom_config.yaml
 """
 
 import argparse
 import sys
-import json
 from pathlib import Path
 from datetime import datetime
 
-import torch
-
-from .training.config import GATConfig
-from .training.trainer import Trainer
+from .training import GATConfig, Trainer
 from .models.gat import GAT
-from .data.dataset import BuildingGraphDataset
-from .data.data_utils import split_dataset
-from .utils.logger import setup_logger
+from .data import BuildingGraphDataset, BuildingDataset, split_dataset
+from .utils import setup_logger
 
 
 def parse_args():
@@ -29,97 +23,24 @@ def parse_args():
         formatter_class=argparse.ArgumentDefaultsHelpFormatter
     )
 
-    # Data arguments
+    # Required path arguments
     parser.add_argument(
         '--data-dir',
         type=str,
-        default='output/voronoi',
+        required=True,
         help='Directory containing adjacency matrices (pkl files)'
     )
     parser.add_argument(
-        '--building-shapefile',
+        '--sample-buildings',
         type=str,
-        required=False,
-        help='Path to building shapefile (required if not in config)'
-    )
-    parser.add_argument(
-        '--district-ids',
-        type=int,
-        nargs='+',
-        default=None,
-        help='List of district IDs to train on (default: auto-detect)'
-    )
-
-    # Model arguments
-    parser.add_argument(
-        '--hidden-dim',
-        type=int,
-        default=64,
-        help='Hidden dimension per attention head'
-    )
-    parser.add_argument(
-        '--num-layers',
-        type=int,
-        default=3,
-        help='Number of GAT layers'
-    )
-    parser.add_argument(
-        '--num-heads',
-        type=int,
-        default=8,
-        help='Number of attention heads'
-    )
-    parser.add_argument(
-        '--dropout',
-        type=float,
-        default=0.6,
-        help='Dropout rate'
-    )
-
-    # Training arguments
-    parser.add_argument(
-        '--lr',
-        type=float,
-        default=5e-3,
-        help='Learning rate'
-    )
-    parser.add_argument(
-        '--epochs',
-        type=int,
-        default=200,
-        help='Maximum number of epochs'
-    )
-    parser.add_argument(
-        '--batch-size',
-        type=int,
-        default=1024,
-        help='Batch size (nodes per batch for NeighborLoader)'
-    )
-    parser.add_argument(
-        '--patience',
-        type=int,
-        default=100,
-        help='Early stopping patience'
-    )
-
-    # Paths
-    parser.add_argument(
-        '--checkpoint-dir',
-        type=str,
-        default='models/gat',
-        help='Directory to save checkpoints'
-    )
-    parser.add_argument(
-        '--log-dir',
-        type=str,
-        default='runs/gat',
-        help='Directory for TensorBoard logs'
+        required=True,
+        help='Path to building shapefile'
     )
     parser.add_argument(
         '--output-dir',
         type=str,
-        default='output/gat',
-        help='Directory for output embeddings'
+        required=True,
+        help='Directory for all outputs (checkpoints, logs, embeddings)'
     )
 
     # Config file
@@ -127,7 +48,7 @@ def parse_args():
         '--config',
         type=str,
         default=None,
-        help='Path to config JSON file (overrides other arguments)'
+        help='Path to training config YAML file (default: src/gat/training_config.yaml)'
     )
 
     # Resume training
@@ -138,36 +59,7 @@ def parse_args():
         help='Path to checkpoint to resume from'
     )
 
-    # Device
-    parser.add_argument(
-        '--device',
-        type=str,
-        default='cuda' if torch.cuda.is_available() else 'cpu',
-        help='Device to use (cuda or cpu)'
-    )
-
-    # Other
-    parser.add_argument(
-        '--seed',
-        type=int,
-        default=42,
-        help='Random seed'
-    )
-    parser.add_argument(
-        '--no-tensorboard',
-        action='store_true',
-        help='Disable TensorBoard logging'
-    )
-
     return parser.parse_args()
-
-
-def load_config_from_file(config_path: str) -> GATConfig:
-    """Load configuration from JSON file."""
-    with open(config_path, 'r', encoding='utf-8') as f:
-        config_dict = json.load(f)
-
-    return GATConfig(**config_dict)
 
 
 def auto_detect_district_ids(data_dir: Path) -> list:
@@ -189,43 +81,42 @@ def auto_detect_district_ids(data_dir: Path) -> list:
 def main():
     """Main training function."""
     args = parse_args()
+    config_path = Path(args.config)
 
-    # Load configuration
-    if args.config:
-        config = load_config_from_file(args.config)
-        print(f"Loaded configuration from {args.config}")
-    else:
-        # Create config from command line arguments
-        config = GATConfig(
-            data_dir=args.data_dir,
-            building_shapefile=args.building_shapefile or '',
-            hidden_dim=args.hidden_dim,
-            num_layers=args.num_layers,
-            num_heads=args.num_heads,
-            dropout=args.dropout,
-            lr=args.lr,
-            epochs=args.epochs,
-            batch_size=args.batch_size,
-            patience=args.patience,
-            checkpoint_dir=args.checkpoint_dir,
-            log_dir=args.log_dir,
-            output_dir=args.output_dir,
-            device=args.device,
-            seed=args.seed,
-            enable_tensorboard=not args.no_tensorboard,
-            district_ids=args.district_ids or []
-        )
+    if not config_path.exists():
+        print(f"Error: Config file not found: {config_path}")
+        print("Please specify a valid config file with --config or use the default training_config.yaml")
+        sys.exit(1)
+
+    # Load configuration from YAML
+    override_paths = {
+        'data_dir': args.data_dir,
+        'building_shapefile': args.sample_buildings,
+        'output_dir': args.output_dir,
+    }
+    config = GATConfig.from_yaml(config_path, override_paths=override_paths)
+    print(f"✓ Loaded configuration from {config_path}")
 
     # Validate required paths
-    building_shapefile_path = Path(config.building_shapefile) if config.building_shapefile else None
-    if not building_shapefile_path or not building_shapefile_path.exists():
-        print("Error: Building shapefile path is required and must exist!")
-        print("Use --building-shapefile to specify the path.")
+    data_dir = Path(config.data_dir)
+    building_shapefile_path = Path(config.building_shapefile)
+    output_dir = Path(config.output_dir)
+
+    if not data_dir.exists():
+        print(f"✗ Error: Data directory not found: {data_dir}")
         sys.exit(1)
 
-    if not config.data_dir.exists():
-        print(f"Error: Data directory not found: {config.data_dir}")
+    if not building_shapefile_path.exists():
+        print(f"✗ Error: Building shapefile not found: {building_shapefile_path}")
         sys.exit(1)
+
+    # Create output directory structure
+    output_dir.mkdir(parents=True, exist_ok=True)
+    building_dataset = BuildingDataset(building_shapefile_path)
+    print(f"✓ Output directory: {output_dir}")
+    print(f"  - Checkpoints: {config.checkpoint_dir}")
+    print(f"  - Logs: {config.log_dir}")
+    print(f"  - Embeddings: {config.output_dir}")
 
     # Setup logger
     log_file = config.log_dir / f"training_{datetime.now().strftime('%Y%m%d_%H%M%S')}.log"
@@ -236,32 +127,17 @@ def main():
     logger.info("=" * 80)
     logger.info("Configuration:\n%s", config)
 
-    # Auto-detect district IDs if not specified
-    if not config.district_ids:
-        config.district_ids = auto_detect_district_ids(config.data_dir)
-        logger.info("Auto-detected %d districts: %s", len(config.district_ids), config.district_ids)
-
-    if len(config.district_ids) == 0:
-        logger.error("No districts found! Please check data directory.")
-        sys.exit(1)
-
     # Load dataset
     logger.info("Loading dataset...")
     try:
         dataset = BuildingGraphDataset(
-            root=str(config.data_dir),
-            district_ids=config.district_ids,
-            building_shapefile_path=str(config.building_shapefile),
-            normalize_features=True
+            district_folder=data_dir,
+            building_dataset=building_dataset
         )
 
         logger.info("Dataset loaded: %d districts", len(dataset))
         stats = dataset.get_statistics()
         logger.info("Dataset statistics: %s", stats)
-
-        # Update num_classes in config
-        config.num_classes = dataset.get_num_classes()
-        logger.info("Number of classes: %d", config.num_classes)
 
     except Exception as exc:
         logger.error("Failed to load dataset: %s", exc, exc_info=True)
@@ -284,7 +160,10 @@ def main():
         num_heads=config.num_heads,
         dropout=config.dropout,
         negative_slope=config.negative_slope,
-        add_self_loops=config.add_self_loops
+        add_self_loops=config.add_self_loops,
+        pooling=config.pooling,
+        min_clusters=config.min_clusters,
+        max_clusters=config.max_clusters
     )
 
     logger.info("Model:\n%s", model)

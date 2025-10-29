@@ -2,8 +2,9 @@
 
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import List, Optional
+from typing import List, Dict, Any
 import torch
+import yaml
 
 
 @dataclass
@@ -24,6 +25,9 @@ class GATConfig:
     dropout: float = 0.6  # Dropout rate (as in pytorch-GAT)
     negative_slope: float = 0.2  # LeakyReLU slope for attention
     add_self_loops: bool = True  # Add self-loops to graphs
+    pooling: str = 'mean_max'  # Graph pooling method for cluster prediction
+    min_clusters: int = 2  # Minimum expected number of clusters
+    max_clusters: int = 10  # Maximum expected number of clusters
 
     # Training parameters
     lr: float = 5e-3  # Learning rate (as in pytorch-GAT)
@@ -31,6 +35,8 @@ class GATConfig:
     epochs: int = 200  # Maximum number of epochs
     patience: int = 100  # Early stopping patience
     min_delta: float = 1e-4  # Minimum improvement for early stopping
+    lambda_node: float = 1.0  # Weight for node classification loss
+    lambda_cluster: float = 1.0  # Weight for cluster count prediction loss
 
     # Data parameters
     batch_size: int = 1024  # Nodes per batch for NeighborLoader
@@ -66,17 +72,17 @@ class GATConfig:
         """Post-initialization validation and path conversion."""
         # Convert paths to Path objects
         self.data_dir = Path(self.data_dir)
+        self.output_dir = Path(self.output_dir)
         self.checkpoint_dir = Path(self.checkpoint_dir)
         self.log_dir = Path(self.log_dir)
-        self.output_dir = Path(self.output_dir)
 
         if self.building_shapefile:
             self.building_shapefile = Path(self.building_shapefile)
 
         # Create directories if they don't exist
-        self.checkpoint_dir.mkdir(parents=True, exist_ok=True)
-        self.log_dir.mkdir(parents=True, exist_ok=True)
-        self.output_dir.mkdir(parents=True, exist_ok=True)
+        Path(self.checkpoint_dir).mkdir(parents=True, exist_ok=True)
+        Path(self.log_dir).mkdir(parents=True, exist_ok=True)
+        Path(self.output_dir).mkdir(parents=True, exist_ok=True)
 
         # Validate parameters
         assert self.hidden_dim > 0, "hidden_dim must be positive"
@@ -100,6 +106,9 @@ class GATConfig:
                 'dropout': self.dropout,
                 'negative_slope': self.negative_slope,
                 'add_self_loops': self.add_self_loops,
+                'pooling': self.pooling,
+                'min_clusters': self.min_clusters,
+                'max_clusters': self.max_clusters,
             },
             'training': {
                 'lr': self.lr,
@@ -109,6 +118,8 @@ class GATConfig:
                 'batch_size': self.batch_size,
                 'num_neighbors': self.num_neighbors,
                 'train_ratio': self.train_ratio,
+                'lambda_node': self.lambda_node,
+                'lambda_cluster': self.lambda_cluster,
             },
             'device': self.device,
             'seed': self.seed,
@@ -123,4 +134,85 @@ class GATConfig:
             f"  Data: {self.data_dir}\n"
             f")"
         )
+
+    @classmethod
+    def from_yaml(cls, yaml_path: Path, override_paths: Dict[str, Any] = None) -> 'GATConfig':
+        """
+        Load configuration from YAML file.
+        
+        Args:
+            yaml_path: Path to YAML configuration file
+            override_paths: Dictionary to override path parameters (data_dir, building_shapefile, output_dir)
+        
+        Returns:
+            GATConfig instance
+        """
+        with open(yaml_path, 'r', encoding='utf-8') as f:
+            config_dict = yaml.safe_load(f)
+        
+        # Extract parameters from nested structure
+        model_params = config_dict.get('model', {})
+        training_params = config_dict.get('training', {})
+        data_params = config_dict.get('data', {})
+        logging_params = config_dict.get('logging', {})
+        
+        # Build flat parameter dict
+        params = {
+            # Model parameters
+            'in_features': model_params.get('in_features', 12),
+            'hidden_dim': model_params.get('hidden_dim', 64),
+            'num_classes': data_params.get('num_classes', 3),
+            'num_layers': model_params.get('num_layers', 3),
+            'num_heads': model_params.get('num_heads', 8),
+            'dropout': model_params.get('dropout', 0.6),
+            'negative_slope': model_params.get('negative_slope', 0.2),
+            'add_self_loops': model_params.get('add_self_loops', True),
+            'pooling': model_params.get('pooling', 'mean_max'),
+            'min_clusters': model_params.get('min_clusters', 2),
+            'max_clusters': model_params.get('max_clusters', 10),
+            
+            # Training parameters
+            'lr': training_params.get('lr', 5e-3),
+            'weight_decay': training_params.get('weight_decay', 5e-4),
+            'epochs': training_params.get('epochs', 200),
+            'patience': training_params.get('patience', 100),
+            'min_delta': training_params.get('min_delta', 1e-4),
+            'batch_size': training_params.get('batch_size', 1024),
+            'num_neighbors': training_params.get('num_neighbors', [15, 10]),
+            'node_threshold': training_params.get('node_threshold', 2000),
+            'train_ratio': training_params.get('train_ratio', 0.8),
+            'num_workers': training_params.get('num_workers', 0),
+            'use_amp': training_params.get('use_amp', False),
+            'gradient_accumulation_steps': training_params.get('gradient_accumulation_steps', 1),
+            'lambda_node': training_params.get('lambda_node', 1.0),
+            'lambda_cluster': training_params.get('lambda_cluster', 1.0),
+            
+            # Data parameters
+            'district_ids': data_params.get('district_ids', []),
+            
+            # Logging parameters
+            'log_interval': logging_params.get('log_interval', 10),
+            'checkpoint_interval': logging_params.get('checkpoint_interval', 50),
+            'enable_tensorboard': logging_params.get('enable_tensorboard', True),
+            
+            # Other parameters
+            'seed': config_dict.get('seed', 42),
+            'device': config_dict.get('device', 'cuda' if torch.cuda.is_available() else 'cpu'),
+            
+            # Path parameters (will be overridden by command line)
+            'data_dir': 'output/voronoi',
+            'building_shapefile': '',
+            'output_dir': 'output/gat',
+        }
+        
+        # Override with command line path arguments
+        if override_paths:
+            params.update(override_paths)
+        
+        # Construct output subdirectories based on output_dir
+        output_dir = Path(params['output_dir'])
+        params['checkpoint_dir'] = str(output_dir / 'checkpoints')
+        params['log_dir'] = str(output_dir / 'logs')
+        
+        return cls(**params)
 

@@ -6,7 +6,7 @@ def process_district(config, reader, rasterizer, district_row, idx, voronoi_gene
     """Process a district."""
     district_id = district_row.get("FID", idx)
     district_geom = district_row.geometry
-    
+
     # Check if output files already exist and skip if so
     if config.generate_voronoi_diagram:
         # Check for Voronoi output files
@@ -21,7 +21,7 @@ def process_district(config, reader, rasterizer, district_row, idx, voronoi_gene
         if raster_path.exists():
             logger.info("District %s already processed (raster exists), skipping", district_id)
             return
-    
+
     logger.info("\nProcessing district %s (area: %.2f m²)", district_id, 
                district_row.get('area', district_geom.area))
 

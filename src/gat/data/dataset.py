@@ -3,12 +3,12 @@
 import torch
 from torch_geometric.data import Dataset, Data
 from pathlib import Path
-from typing import Optional, List, Tuple
-import geopandas as gpd
+from typing import Optional, List
 from sklearn.preprocessing import StandardScaler
 
 from .data_utils import load_district_graph
 from ..utils.logger import get_logger
+from .building import BuildingDataset
 
 logger = get_logger()
 
@@ -25,52 +25,22 @@ class BuildingGraphDataset(Dataset):
 
     def __init__(
         self,
-        root: str,
+        district_folder: str,
         district_ids: List[int],
-        building_shapefile_path: str,
-        transform=None,
-        pre_transform=None,
-        pre_filter=None,
-        normalize_features: bool = True
+        building_dataset: BuildingDataset,
     ):
         """
         Initialize BuildingGraphDataset.
 
         Args:
-            root: Root directory containing voronoi output
+            district_folder: Folder containing district folders
             district_ids: List of district IDs to load
-            building_shapefile_path: Path to building shapefile
-            transform: Optional transform to apply to each graph
-            pre_transform: Optional transform to apply before saving
-            pre_filter: Optional filter to apply before saving
-            normalize_features: Whether to normalize features with StandardScaler
+            building_dataset: BuildingDataset
         """
         self.district_ids = district_ids
-        self.building_shapefile_path = Path(building_shapefile_path)
-        self.normalize_features = normalize_features
+        self.building_dataset = building_dataset
+        self.district_ids = building_dataset.get_district_ids()
         self.scaler: Optional[StandardScaler] = None
-
-        # Convert root to Path
-        self.data_dir = Path(root)
-
-        super().__init__(str(root), transform, pre_transform, pre_filter)
-
-        # Load all districts and fit scaler
-        self._load_and_prepare_data()
-
-    @property
-    def raw_file_names(self) -> List[str]:
-        """Return list of raw file names."""
-        return [f"district_{did}_adjacency.pkl" for did in self.district_ids]
-
-    @property
-    def processed_file_names(self) -> List[str]:
-        """Return list of processed file names."""
-        return [f"district_{did}.pt" for did in self.district_ids]
-
-    def download(self):
-        """Download data (not needed, data should already exist)."""
-        pass
 
     def process(self):
         """Process raw data and save."""
@@ -179,19 +149,6 @@ class BuildingGraphDataset(Dataset):
             )
 
         return data
-
-    def get_num_classes(self) -> int:
-        """Get number of unique classes in dataset."""
-        all_labels = []
-        for idx in range(len(self)):
-            data = self.get(idx)
-            all_labels.append(data.y.numpy())
-
-        import numpy as np
-        all_labels = np.concatenate(all_labels)
-        num_classes = len(np.unique(all_labels))
-
-        return num_classes
 
     def get_num_features(self) -> int:
         """Get number of node features."""

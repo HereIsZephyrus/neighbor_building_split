@@ -226,3 +226,26 @@ def get_connected_components(edge_index: torch.Tensor, num_nodes: int) -> Tuple[
 
     return component_labels, current_component
 
+
+def global_pool(x: torch.Tensor, method: str = 'mean_max') -> torch.Tensor:
+    """
+    Global pooling over all nodes in a graph.
+    
+    Args:
+        x: Node features tensor of shape (N, D)
+        method: Pooling method - 'mean', 'max', or 'mean_max' (concatenation)
+    
+    Returns:
+        Graph-level feature vector of shape (1, D) or (1, 2*D) for mean_max
+    """
+    if method == 'mean':
+        return x.mean(dim=0, keepdim=True)
+    elif method == 'max':
+        return x.max(dim=0, keepdim=True)[0]
+    elif method == 'mean_max':
+        mean_pool = x.mean(dim=0, keepdim=True)
+        max_pool = x.max(dim=0, keepdim=True)[0]
+        return torch.cat([mean_pool, max_pool], dim=1)
+    else:
+        raise ValueError(f"Unknown pooling method: {method}. Choose from 'mean', 'max', 'mean_max'.")
+

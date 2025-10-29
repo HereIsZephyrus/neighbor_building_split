@@ -108,10 +108,12 @@ def load_district_graph(
         unique_labels = np.unique(labels)
         label_map = {label: idx for idx, label in enumerate(unique_labels)}
         y = torch.tensor([label_map[label] for label in labels], dtype=torch.long)
-        logger.debug(f"Found labels: {len(unique_labels)} classes")
+        num_clusters = len(unique_labels)
+        logger.debug(f"Found labels: {num_clusters} classes")
     else:
         # No labels available
         y = torch.zeros(len(buildings_gdf), dtype=torch.long)
+        num_clusters = 1
         logger.warning(f"No label field found in district {district_id}")
 
     # Create PyG Data object
@@ -121,7 +123,8 @@ def load_district_graph(
         edge_attr=edge_attr,
         y=y,
         num_nodes=len(buildings_gdf),
-        district_id=district_id
+        district_id=district_id,
+        num_clusters=torch.tensor([num_clusters], dtype=torch.float)
     )
 
     logger.info(f"Loaded district {district_id}: {data.num_nodes} nodes, {data.edge_index.shape[1]} edges")

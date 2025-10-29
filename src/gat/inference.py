@@ -120,10 +120,7 @@ def load_model_from_checkpoint(checkpoint_path: Path, device: str) -> tuple:
         num_heads=model_config.get('num_heads', 8),
         dropout=model_config.get('dropout', 0.6),
         negative_slope=model_config.get('negative_slope', 0.2),
-        add_self_loops=model_config.get('add_self_loops', True),
-        pooling=model_config.get('pooling', 'mean_max'),
-        min_clusters=model_config.get('min_clusters', 2),
-        max_clusters=model_config.get('max_clusters', 10)
+        add_self_loops=model_config.get('add_self_loops', True)
     )
 
     # Load state dict

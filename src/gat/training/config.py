@@ -19,15 +19,12 @@ class GATConfig:
     # Model architecture
     in_features: int = 12  # Number of building features
     hidden_dim: int = 64  # Hidden dimension per head
-    num_classes: int = 3  # Number of building categories (will be auto-detected)
+    num_classes: int = 8  # Number of building categories (8 classes)
     num_layers: int = 3  # Number of GAT layers
     num_heads: int = 8  # Number of attention heads
     dropout: float = 0.6  # Dropout rate (as in pytorch-GAT)
     negative_slope: float = 0.2  # LeakyReLU slope for attention
     add_self_loops: bool = True  # Add self-loops to graphs
-    pooling: str = 'mean_max'  # Graph pooling method for cluster prediction
-    min_clusters: int = 2  # Minimum expected number of clusters
-    max_clusters: int = 10  # Maximum expected number of clusters
 
     # Training parameters
     lr: float = 5e-3  # Learning rate (as in pytorch-GAT)
@@ -35,8 +32,8 @@ class GATConfig:
     epochs: int = 200  # Maximum number of epochs
     patience: int = 100  # Early stopping patience
     min_delta: float = 1e-4  # Minimum improvement for early stopping
-    lambda_node: float = 1.0  # Weight for node classification loss
-    lambda_cluster: float = 1.0  # Weight for cluster count prediction loss
+    lambda_smooth: float = 0.5  # Spatial smoothness loss weight
+    smooth_temperature: float = 1.0  # Temperature for smoothness loss softmax
 
     # Data parameters
     batch_size: int = 1024  # Nodes per batch for NeighborLoader
@@ -101,9 +98,6 @@ class GATConfig:
                 'dropout': self.dropout,
                 'negative_slope': self.negative_slope,
                 'add_self_loops': self.add_self_loops,
-                'pooling': self.pooling,
-                'min_clusters': self.min_clusters,
-                'max_clusters': self.max_clusters,
             },
             'training': {
                 'lr': self.lr,
@@ -113,8 +107,8 @@ class GATConfig:
                 'batch_size': self.batch_size,
                 'num_neighbors': self.num_neighbors,
                 'train_ratio': self.train_ratio,
-                'lambda_node': self.lambda_node,
-                'lambda_cluster': self.lambda_cluster,
+                'lambda_smooth': self.lambda_smooth,
+                'smooth_temperature': self.smooth_temperature,
             },
             'device': self.device,
             'seed': self.seed,
@@ -162,9 +156,6 @@ class GATConfig:
             'dropout': model_params.get('dropout', 0.6),
             'negative_slope': model_params.get('negative_slope', 0.2),
             'add_self_loops': model_params.get('add_self_loops', True),
-            'pooling': model_params.get('pooling', 'mean_max'),
-            'min_clusters': model_params.get('min_clusters', 2),
-            'max_clusters': model_params.get('max_clusters', 10),
 
             # Training parameters
             'lr': training_params.get('lr', 5e-3),
@@ -179,8 +170,8 @@ class GATConfig:
             'num_workers': training_params.get('num_workers', 0),
             'use_amp': training_params.get('use_amp', False),
             'gradient_accumulation_steps': training_params.get('gradient_accumulation_steps', 1),
-            'lambda_node': training_params.get('lambda_node', 1.0),
-            'lambda_cluster': training_params.get('lambda_cluster', 1.0),
+            'lambda_smooth': training_params.get('lambda_smooth', 0.5),
+            'smooth_temperature': training_params.get('smooth_temperature', 1.0),
 
             # Data parameters
             'district_ids': data_params.get('district_ids', []),

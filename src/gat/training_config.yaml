@@ -30,14 +30,6 @@ model:
   # 是否添加自环
   add_self_loops: true
 
-  # 图级别池化方法（用于预测聚类数量）
-  # 选项：'mean', 'max', 'mean_max'
-  pooling: "mean_max"
-
-  # 聚类数量范围
-  min_clusters: 1
-  max_clusters: 17
-
 # =============================================================================
 # 训练参数
 # =============================================================================
@@ -82,18 +74,19 @@ training:
   # 梯度累积步数（用于模拟更大的批大小）
   gradient_accumulation_steps: 1
 
-  # 多任务学习损失权重
-  # 节点分类损失权重
-  lambda_node: 1.0
-  # 聚类数量预测损失权重
-  lambda_cluster: 1.0
+  # Spatial smoothness regularization
+  # Weight for smoothness loss (encourages neighboring buildings to have same class)
+  lambda_smooth: 0.5  # Recommended range: 0.1-2.0
+
+  # Temperature for softmax in smoothness loss (lower = stricter constraint)
+  smooth_temperature: 1.0
 
 # =============================================================================
 # 数据参数
 # =============================================================================
 data:
-  # 建筑类别数量（会根据实际数据自动检测）
-  num_classes: 3
+  # 建筑类别数量（固定为8类）
+  num_classes: 8
 
   # 区域ID列表（空列表表示自动从data_dir检测）
   district_ids: []

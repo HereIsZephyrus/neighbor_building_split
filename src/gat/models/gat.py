@@ -121,8 +121,7 @@ class GAT(nn.Module):
         x: torch.Tensor,
         edge_index: torch.Tensor,
         edge_attr: Optional[torch.Tensor] = None,
-        return_embeddings: bool = False,
-        return_all: bool = False
+        return_embeddings: bool = False
     ) -> torch.Tensor:
         """
         Forward pass through GAT.
@@ -131,14 +130,11 @@ class GAT(nn.Module):
             x: Node features (N, in_features)
             edge_index: Edge indices (2, E)
             edge_attr: Optional edge attributes (E,) - not used currently
-            return_embeddings: If True, return penultimate layer embeddings
-            return_all: If True, return (logits, embeddings, num_clusters_pred)
+            return_embeddings: If True, return (logits, embeddings)
 
         Returns:
-            If return_all=True:
-                (node_logits, embeddings, num_clusters_pred)
             If return_embeddings=True:
-                (logits, embeddings)
+                (logits, embeddings): Node classification logits and embeddings
             Otherwise:
                 logits: Output class logits (N, num_classes)
         """
@@ -157,16 +153,7 @@ class GAT(nn.Module):
         # Final layer for node classification (no activation, no dropout after)
         node_logits = self.convs[-1](x, edge_index, edge_attr)
 
-        # Graph-level pooling for cluster prediction
-        graph_embedding = global_pool(embeddings, method=self.pooling)
-        num_clusters_pred = self.cluster_predictor(graph_embedding)
-
-        # Clamp prediction to valid range
-        num_clusters_pred = torch.clamp(num_clusters_pred, min=self.min_clusters, max=self.max_clusters)
-
-        if return_all:
-            return node_logits, embeddings, num_clusters_pred
-        elif return_embeddings:
+        if return_embeddings:
             return node_logits, embeddings
         else:
             return node_logits
@@ -198,7 +185,7 @@ class GAT(nn.Module):
         edge_attr: Optional[torch.Tensor] = None
     ) -> Tuple[torch.Tensor, torch.Tensor]:
         """
-        Forward pass for inference: returns embeddings and predicted cluster count.
+        Forward pass for inference: returns logits and embeddings.
 
         Args:
             x: Node features (N, in_features)
@@ -206,13 +193,13 @@ class GAT(nn.Module):
             edge_attr: Optional edge attributes (E,)
 
         Returns:
+            logits: Node classification logits (N, num_classes)
             embeddings: Node embeddings (N, embedding_dim)
-            num_clusters_pred: Predicted number of clusters (1, 1)
         """
-        _, embeddings, num_clusters_pred = self.forward(
-            x, edge_index, edge_attr, return_all=True
+        logits, embeddings = self.forward(
+            x, edge_index, edge_attr, return_embeddings=True
         )
-        return embeddings, num_clusters_pred
+        return logits, embeddings
 
     def get_attention_weights(
         self,
@@ -263,9 +250,7 @@ class GAT(nn.Module):
             f'  num_layers={self.num_layers},\n'
             f'  num_heads={self.num_heads},\n'
             f'  dropout={self.dropout},\n'
-            f'  embedding_dim={self.embedding_dim},\n'
-            f'  pooling={self.pooling},\n'
-            f'  cluster_range=[{self.min_clusters}, {self.max_clusters}]\n'
+            f'  embedding_dim={self.embedding_dim}\n'
             f')'
         )
 

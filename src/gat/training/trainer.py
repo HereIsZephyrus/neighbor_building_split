@@ -14,6 +14,7 @@ from pathlib import Path
 from ..models.gat import GAT
 from ..data.graph_batch_sampler import create_neighbor_loader, should_use_neighbor_sampling
 from .config import GATConfig
+from .smooth_loss import edge_smoothness_loss
 from .train_utils import (
     save_checkpoint,
     load_checkpoint,
@@ -80,9 +81,8 @@ class Trainer:
             patience=config.patience // 2
         )
 
-        # Loss functions
+        # Loss function
         self.criterion = nn.CrossEntropyLoss()  # Node classification
-        self.cluster_criterion = nn.L1Loss()  # Cluster count regression (MAE)
 
         # Early stopping
         self.early_stopping = EarlyStopping(
@@ -102,14 +102,12 @@ class Trainer:
         self.history = {
             'train_loss': [],
             'train_acc': [],
-            'train_node_loss': [],
-            'train_cluster_loss': [],
-            'train_cluster_mae': [],
+            'train_cls_loss': [],      # Classification loss component
+            'train_smooth_loss': [],   # Smoothness loss component
             'val_loss': [],
             'val_acc': [],
-            'val_node_loss': [],
-            'val_cluster_loss': [],
-            'val_cluster_mae': [],
+            'val_cls_loss': [],        # Classification loss component
+            'val_smooth_loss': [],     # Smoothness loss component
             'lr': []
         }
 
@@ -129,12 +127,10 @@ class Trainer:
         self.model.train()
 
         total_loss = 0
-        total_node_loss = 0
-        total_cluster_loss = 0
+        total_cls_loss = 0
+        total_smooth_loss = 0
         total_correct = 0
         total_samples = 0
-        total_cluster_mae = 0
-        num_graphs = 0
 
         # Train on each graph
         for data in self.train_data_list:
@@ -155,24 +151,28 @@ class Trainer:
                 for batch_count, batch in enumerate(loader):
                     batch = batch.to(self.device)
 
-                    # Forward pass with multi-task outputs
-                    node_logits, _, cluster_pred = self.model(
-                        batch.x, batch.edge_index, return_all=True
-                    )
+                    # Forward pass
+                    node_logits = self.model(batch.x, batch.edge_index)
 
-                    # Only compute node loss on sampled nodes
+                    # Classification loss on sampled nodes
                     # NeighborLoader provides batch.batch_size for the number of seed nodes
-                    node_loss = self.criterion(
+                    loss_cls = self.criterion(
                         node_logits[:batch.batch_size], 
                         batch.y[:batch.batch_size]
                     )
 
-                    # Cluster loss uses full graph
-                    cluster_loss = self.cluster_criterion(cluster_pred, data.num_clusters)
+                    # Spatial smoothness loss on all nodes in batch
+                    # Extract edge attributes if available
+                    edge_attr = batch.edge_attr if hasattr(batch, 'edge_attr') else None
+                    loss_smooth = edge_smoothness_loss(
+                        node_logits,
+                        batch.edge_index,
+                        edge_attr,
+                        temperature=self.config.smooth_temperature
+                    )
 
                     # Combined loss
-                    loss = (self.config.lambda_node * node_loss + 
-                           self.config.lambda_cluster * cluster_loss)
+                    loss = loss_cls + self.config.lambda_smooth * loss_smooth
 
                     # Backward pass
                     loss.backward()
@@ -189,15 +189,8 @@ class Trainer:
                         total_correct += correct
                         total_samples += batch.batch_size
                         total_loss += loss.item() * batch.batch_size
-                        total_node_loss += node_loss.item() * batch.batch_size
-                        total_cluster_loss += cluster_loss.item()
-
-                # Track cluster MAE per graph (after all batches)
-                with torch.no_grad():
-                    _, _, cluster_pred = self.model(data.x, data.edge_index, return_all=True)
-                    cluster_mae = torch.abs(cluster_pred - data.num_clusters).item()
-                    total_cluster_mae += cluster_mae
-                    num_graphs += 1
+                        total_cls_loss += loss_cls.item() * batch.batch_size
+                        total_smooth_loss += loss_smooth.item() * batch.batch_size
 
                 # Final optimizer step if needed
                 if batch_count % self.config.gradient_accumulation_steps != 0:
@@ -208,18 +201,23 @@ class Trainer:
                 # Full-graph training
                 self.optimizer.zero_grad()
 
-                # Forward pass with multi-task outputs
-                node_logits, _, cluster_pred = self.model(
-                    data.x, data.edge_index, return_all=True
+                # Forward pass
+                node_logits = self.model(data.x, data.edge_index)
+
+                # Classification loss
+                loss_cls = self.criterion(node_logits, data.y)
+
+                # Spatial smoothness loss
+                edge_attr = data.edge_attr if hasattr(data, 'edge_attr') else None
+                loss_smooth = edge_smoothness_loss(
+                    node_logits,
+                    data.edge_index,
+                    edge_attr,
+                    temperature=self.config.smooth_temperature
                 )
 
-                # Compute losses
-                node_loss = self.criterion(node_logits, data.y)
-                cluster_loss = self.cluster_criterion(cluster_pred, data.num_clusters)
-
                 # Combined loss
-                loss = (self.config.lambda_node * node_loss + 
-                       self.config.lambda_cluster * cluster_loss)
+                loss = loss_cls + self.config.lambda_smooth * loss_smooth
 
                 # Backward pass
                 loss.backward()
@@ -229,29 +227,24 @@ class Trainer:
                 with torch.no_grad():
                     pred = node_logits.argmax(dim=1)
                     correct = (pred == data.y).sum().item()
-                    cluster_mae = torch.abs(cluster_pred - data.num_clusters).item()
 
                     total_correct += correct
                     total_samples += data.num_nodes
                     total_loss += loss.item() * data.num_nodes
-                    total_node_loss += node_loss.item() * data.num_nodes
-                    total_cluster_loss += cluster_loss.item()
-                    total_cluster_mae += cluster_mae
-                    num_graphs += 1
+                    total_cls_loss += loss_cls.item() * data.num_nodes
+                    total_smooth_loss += loss_smooth.item() * data.num_nodes
 
         # Average metrics
         avg_loss = total_loss / total_samples if total_samples > 0 else 0
         avg_acc = total_correct / total_samples if total_samples > 0 else 0
-        avg_node_loss = total_node_loss / total_samples if total_samples > 0 else 0
-        avg_cluster_loss = total_cluster_loss / num_graphs if num_graphs > 0 else 0
-        avg_cluster_mae = total_cluster_mae / num_graphs if num_graphs > 0 else 0
+        avg_cls_loss = total_cls_loss / total_samples if total_samples > 0 else 0
+        avg_smooth_loss = total_smooth_loss / total_samples if total_samples > 0 else 0
 
         metrics = {
             'loss': avg_loss,
             'accuracy': avg_acc,
-            'node_loss': avg_node_loss,
-            'cluster_loss': avg_cluster_loss,
-            'cluster_mae': avg_cluster_mae
+            'cls_loss': avg_cls_loss,
+            'smooth_loss': avg_smooth_loss
         }
 
         return metrics
@@ -270,55 +263,53 @@ class Trainer:
         self.model.eval()
 
         total_loss = 0
-        total_node_loss = 0
-        total_cluster_loss = 0
+        total_cls_loss = 0
+        total_smooth_loss = 0
         total_correct = 0
         total_samples = 0
-        total_cluster_mae = 0
-        num_graphs = 0
 
         for data in self.val_data_list:
             data = data.to(self.device)
 
-            # Forward pass with multi-task outputs
-            node_logits, _, cluster_pred = self.model(
-                data.x, data.edge_index, return_all=True
+            # Forward pass
+            node_logits = self.model(data.x, data.edge_index)
+
+            # Classification loss
+            loss_cls = self.criterion(node_logits, data.y)
+
+            # Spatial smoothness loss
+            edge_attr = data.edge_attr if hasattr(data, 'edge_attr') else None
+            loss_smooth = edge_smoothness_loss(
+                node_logits,
+                data.edge_index,
+                edge_attr,
+                temperature=self.config.smooth_temperature
             )
 
-            # Compute losses
-            node_loss = self.criterion(node_logits, data.y)
-            cluster_loss = self.cluster_criterion(cluster_pred, data.num_clusters)
-
             # Combined loss
-            loss = (self.config.lambda_node * node_loss + 
-                   self.config.lambda_cluster * cluster_loss)
+            loss = loss_cls + self.config.lambda_smooth * loss_smooth
 
             # Metrics
             pred = node_logits.argmax(dim=1)
             correct = (pred == data.y).sum().item()
-            cluster_mae = torch.abs(cluster_pred - data.num_clusters).item()
 
             total_correct += correct
             total_samples += data.num_nodes
             total_loss += loss.item() * data.num_nodes
-            total_node_loss += node_loss.item() * data.num_nodes
-            total_cluster_loss += cluster_loss.item()
-            total_cluster_mae += cluster_mae
-            num_graphs += 1
+            total_cls_loss += loss_cls.item() * data.num_nodes
+            total_smooth_loss += loss_smooth.item() * data.num_nodes
 
         # Average metrics
         avg_loss = total_loss / total_samples if total_samples > 0 else 0
         avg_acc = total_correct / total_samples if total_samples > 0 else 0
-        avg_node_loss = total_node_loss / total_samples if total_samples > 0 else 0
-        avg_cluster_loss = total_cluster_loss / num_graphs if num_graphs > 0 else 0
-        avg_cluster_mae = total_cluster_mae / num_graphs if num_graphs > 0 else 0
+        avg_cls_loss = total_cls_loss / total_samples if total_samples > 0 else 0
+        avg_smooth_loss = total_smooth_loss / total_samples if total_samples > 0 else 0
 
         metrics = {
             'loss': avg_loss,
             'accuracy': avg_acc,
-            'node_loss': avg_node_loss,
-            'cluster_loss': avg_cluster_loss,
-            'cluster_mae': avg_cluster_mae
+            'cls_loss': avg_cls_loss,
+            'smooth_loss': avg_smooth_loss
         }
 
         return metrics
@@ -360,17 +351,15 @@ class Trainer:
 
             self.history['train_loss'].append(train_metrics['loss'])
             self.history['train_acc'].append(train_metrics['accuracy'])
-            self.history['train_node_loss'].append(train_metrics['node_loss'])
-            self.history['train_cluster_loss'].append(train_metrics['cluster_loss'])
-            self.history['train_cluster_mae'].append(train_metrics['cluster_mae'])
+            self.history['train_cls_loss'].append(train_metrics['cls_loss'])
+            self.history['train_smooth_loss'].append(train_metrics['smooth_loss'])
             self.history['lr'].append(current_lr)
 
             if val_metrics:
                 self.history['val_loss'].append(val_metrics['loss'])
                 self.history['val_acc'].append(val_metrics['accuracy'])
-                self.history['val_node_loss'].append(val_metrics['node_loss'])
-                self.history['val_cluster_loss'].append(val_metrics['cluster_loss'])
-                self.history['val_cluster_mae'].append(val_metrics['cluster_mae'])
+                self.history['val_cls_loss'].append(val_metrics['cls_loss'])
+                self.history['val_smooth_loss'].append(val_metrics['smooth_loss'])
 
             # TensorBoard logging
             if self.writer is not None:

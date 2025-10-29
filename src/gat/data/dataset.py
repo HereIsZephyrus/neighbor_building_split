@@ -44,7 +44,7 @@ class BuildingGraphDataset(Dataset):
         """
         # Initialize parent class
         super().__init__()
-        
+
         self.adjacency_dir = Path(adjacency_dir)
         self.district_dataset = district_dataset
         self.building_dataset = building_dataset
@@ -259,7 +259,7 @@ class BuildingGraphDataset(Dataset):
                 'num_classes': 0,
                 'num_features': self.num_features,
             }
-        
+
         total_nodes = 0
         total_edges = 0
         all_labels = []

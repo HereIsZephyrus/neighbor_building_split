@@ -168,10 +168,7 @@ def main():
         num_heads=config.num_heads,
         dropout=config.dropout,
         negative_slope=config.negative_slope,
-        add_self_loops=config.add_self_loops,
-        pooling=config.pooling,
-        min_clusters=config.min_clusters,
-        max_clusters=config.max_clusters
+        add_self_loops=config.add_self_loops
     )
 
     logger.info("Model:\n%s", model)

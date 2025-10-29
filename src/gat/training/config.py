@@ -16,8 +16,6 @@ class GATConfig:
     adapted for building clustering task.
     """
 
-    # Model architecture
-    in_features: int = 12  # Number of building features
     hidden_dim: int = 64  # Hidden dimension per head
     num_classes: int = 8  # Number of building categories (8 classes)
     num_layers: int = 3  # Number of GAT layers
@@ -88,17 +86,18 @@ class GATConfig:
 
     def to_dict(self) -> dict:
         """Convert config to dictionary."""
+        model_dict = {
+            'hidden_dim': self.hidden_dim,
+            'num_classes': self.num_classes,
+            'num_layers': self.num_layers,
+            'num_heads': self.num_heads,
+            'dropout': self.dropout,
+            'negative_slope': self.negative_slope,
+            'add_self_loops': self.add_self_loops,
+        }
+
         return {
-            'model': {
-                'in_features': self.in_features,
-                'hidden_dim': self.hidden_dim,
-                'num_classes': self.num_classes,
-                'num_layers': self.num_layers,
-                'num_heads': self.num_heads,
-                'dropout': self.dropout,
-                'negative_slope': self.negative_slope,
-                'add_self_loops': self.add_self_loops,
-            },
+            'model': model_dict,
             'training': {
                 'lr': self.lr,
                 'weight_decay': self.weight_decay,
@@ -147,8 +146,6 @@ class GATConfig:
 
         # Build flat parameter dict
         params = {
-            # Model parameters
-            'in_features': model_params.get('in_features', 12),
             'hidden_dim': model_params.get('hidden_dim', 64),
             'num_classes': data_params.get('num_classes', 3),
             'num_layers': model_params.get('num_layers', 3),

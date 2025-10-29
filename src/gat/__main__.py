@@ -147,6 +147,10 @@ def main():
         stats = dataset.get_statistics()
         logger.info("Dataset statistics: %s", stats)
 
+        # Update config with actual number of features from dataset
+        config.in_features = dataset.num_features
+        logger.info("Auto-detected %d input features from dataset", config.in_features)
+
     except Exception as exc:
         logger.error("Failed to load dataset: %s", exc, exc_info=True)
         sys.exit(1)
@@ -161,7 +165,7 @@ def main():
     # Initialize model
     logger.info("Initializing model...")
     model = GAT(
-        in_features=config.in_features,
+        in_features=dataset.num_features,
         hidden_dim=config.hidden_dim,
         num_classes=config.num_classes,
         num_layers=config.num_layers,

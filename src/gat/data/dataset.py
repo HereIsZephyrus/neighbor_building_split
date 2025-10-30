@@ -92,7 +92,7 @@ class BuildingGraphDataset(Dataset):
                     continue
 
                 features = buildings_df[feature_cols].values
-                
+
                 # Calculate degrees for this district
                 # Build ID to index mapping
                 if 'id' in buildings_df.columns:
@@ -100,13 +100,13 @@ class BuildingGraphDataset(Dataset):
                 else:
                     building_ids = buildings_df.index.values
                 id_to_idx = {bid: idx for idx, bid in enumerate(building_ids)}
-                
+
                 # Count edges for degree calculation
                 num_nodes = len(buildings_df)
                 degrees = np.zeros((num_nodes, 1))
                 row_ids = adjacency_df.index.tolist()
                 col_ids = adjacency_df.columns.tolist()
-                
+
                 for i, source_id in enumerate(row_ids):
                     if source_id not in id_to_idx:
                         continue
@@ -119,7 +119,7 @@ class BuildingGraphDataset(Dataset):
                             target_idx = id_to_idx[target_id]
                             if source_idx != target_idx:
                                 degrees[source_idx] += 1
-                
+
                 # Concatenate original features with degree
                 features_with_degree = np.hstack([features, degrees])
                 all_features.append(features_with_degree)
@@ -245,15 +245,15 @@ class BuildingGraphDataset(Dataset):
                 degree[src_idx] += 1
                 # If this is a directed edge, also count reverse direction
                 # For undirected graphs, adjacency matrix should be symmetric
-        
+
         # Add degree as a new feature
         degree_feature = degree.numpy().reshape(-1, 1)
         features_with_degree = np.hstack([features, degree_feature])
-        
+
         # Normalize features including degree
         features_normalized = self.scaler.transform(features_with_degree)
         x = torch.tensor(features_normalized, dtype=torch.float)
-        
+
         logger.debug(f"District {district_id}: Added degree feature. Features shape: {x.shape}")
 
         # Create Data object

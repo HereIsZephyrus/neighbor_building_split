@@ -21,6 +21,7 @@ from .data.data_utils import load_district_graph
 from .utils.logger import setup_logger, get_logger
 from .utils.spectral_clustering import perform_spectral_clustering_pipeline
 
+logger = get_logger()
 
 def parse_args():
     """Parse command line arguments."""
@@ -105,7 +106,6 @@ def load_model_from_file(checkpoint_path: Path, device: str) -> tuple:
     Returns:
         Tuple of (model, config)
     """
-    logger = get_logger()
     logger.info("Loading checkpoint from %s", checkpoint_path)
 
     checkpoint = torch.load(checkpoint_path, map_location=device)
@@ -164,7 +164,6 @@ def generate_embeddings_for_district(
         Tuple of (embeddings, logits, gat_labels, spectral_clusters, 
                   cluster_to_label, original_labels, num_nodes, n_clusters, scaler, has_labels)
     """
-    logger = get_logger()
 
     try:
         # Load district data (normalized features)
@@ -322,9 +321,107 @@ def save_embeddings(
     with open(output_file, 'wb') as f:
         pickle.dump(data, f)
 
-    logger = get_logger()
     mode_str = " (with ground truth)" if has_ground_truth else " (inference only)"
     logger.info("Embeddings and clustering results%s saved to %s", mode_str, output_file)
+
+def update_building_predictions(
+    district_id: int,
+    district_buildings: gpd.GeoDataFrame,
+    output_dir: Path
+) -> None:
+    """
+    Update building predictions for a single district.
+    """
+    building_output_file = output_dir / 'building_predictions.gpkg'
+    if building_output_file.exists():
+        # Append to existing file
+        existing_gdf = gpd.read_file(building_output_file)
+
+        # Remove any existing records for this district (in case of re-run)
+        existing_gdf = existing_gdf[existing_gdf['district_id'] != district_id]
+
+        # Combine with new data
+        combined_gdf = pd.concat([existing_gdf, district_buildings], ignore_index=True)
+        combined_gdf.to_file(building_output_file, driver='GPKG')
+
+        logger.info("Updated GeoPackage for district %d: %d buildings (total: %d buildings)",
+                    district_id, len(district_buildings), len(combined_gdf))
+    else:
+        # Create new file
+        district_buildings.to_file(building_output_file, driver='GPKG')
+        logger.info("Created GeoPackage for district %d: %d buildings",
+                    district_id, len(district_buildings))
+
+def update_district_predictions(
+    district_id: int,
+    adjacency_dir: Path,
+    district_buildings: gpd.GeoDataFrame,
+    output_dir: Path
+) -> None:
+    """
+    Update district predictions for a single district.
+    """
+    voronoi_input_file = adjacency_dir / f'district_{district_id}_voronoi.shp'
+    voronoi_output_file = output_dir / 'voronoi_predictions.gpkg'
+
+    if not voronoi_input_file.exists():
+        logger.warning("Voronoi file not found: %s", voronoi_input_file)
+        return
+
+    try:
+        voronoi_gdf = gpd.read_file(voronoi_input_file)
+        voronoi_id_field = 'FID'
+        buildings_id_field = 'id'
+        label_field = 'gat_label'
+
+        id_to_label = dict(zip(
+            district_buildings[buildings_id_field],
+            district_buildings[label_field]
+        ))
+
+        # Map labels to voronoi elements
+        voronoi_gdf['prediction'] = voronoi_gdf[voronoi_id_field].map(id_to_label)
+        voronoi_gdf['district_id'] = district_id
+
+        # Remove elements without labels
+        voronoi_gdf = voronoi_gdf[voronoi_gdf['prediction'].notna()].copy()
+
+        if len(voronoi_gdf) == 0:
+            logger.warning("No valid voronoi elements found for district %d", district_id)
+            return
+
+        voronoi_gdf['prediction'] = voronoi_gdf['prediction'].astype(int)
+
+        # Use dissolve to merge elements with same labels
+        dissolved_gdf = voronoi_gdf.dissolve(
+            by=['district_id', 'prediction'],
+            aggfunc='first'  # Keep first value for other fields
+        ).reset_index()
+
+        logger.info(
+            "District %d: merged %d voronoi elements into %d prediction regions",
+            district_id, len(voronoi_gdf), len(dissolved_gdf)
+        )
+
+        if voronoi_output_file.exists():
+            existing_gdf = gpd.read_file(voronoi_output_file)
+            existing_gdf = existing_gdf[existing_gdf['district_id'] != district_id]
+            combined_gdf = pd.concat([existing_gdf, dissolved_gdf], ignore_index=True)
+            combined_gdf.to_file(voronoi_output_file, driver='GPKG')
+
+            logger.info(
+                "Updated voronoi prediction file for district %d: %d regions (total: %d regions)",
+                district_id, len(dissolved_gdf), len(combined_gdf)
+            )
+        else:
+            dissolved_gdf.to_file(voronoi_output_file, driver='GPKG')
+            logger.info(
+                "Created voronoi prediction file for district %d: %d regions",
+                district_id, len(dissolved_gdf)
+            )
+
+    except Exception as exc:
+        logger.error("Failed to update voronoi prediction for district %d: %s", district_id, exc, exc_info=True)
 
 
 def update_gpkg_with_district(
@@ -345,7 +442,6 @@ def update_gpkg_with_district(
         adjacency_dir: Directory containing adjacency matrices
         output_dir: Output directory for GeoPackage
     """
-    logger = get_logger()
 
     try:
         # Load building shapefile
@@ -408,27 +504,18 @@ def update_gpkg_with_district(
         if district_buildings['spectral_cluster'].notna().any():
             district_buildings['spectral_cluster'] = district_buildings['spectral_cluster'].astype('Int64')
 
-        # Save to GeoPackage (append mode if file exists)
-        output_file = output_dir / 'building_predictions.gpkg'
+        update_building_predictions(
+            district_id=district_id,
+            district_buildings=district_buildings,
+            output_dir=output_dir
+        )
 
-        if output_file.exists():
-            # Append to existing file
-            existing_gdf = gpd.read_file(output_file)
-
-            # Remove any existing records for this district (in case of re-run)
-            existing_gdf = existing_gdf[existing_gdf['district_id'] != district_id]
-
-            # Combine with new data
-            combined_gdf = pd.concat([existing_gdf, district_buildings], ignore_index=True)
-            combined_gdf.to_file(output_file, driver='GPKG')
-
-            logger.info("Updated GeoPackage with district %d: %d buildings (total: %d buildings)", 
-                       district_id, len(district_buildings), len(combined_gdf))
-        else:
-            # Create new file
-            district_buildings.to_file(output_file, driver='GPKG')
-            logger.info("Created GeoPackage with district %d: %d buildings", 
-                       district_id, len(district_buildings))
+        update_district_predictions(
+            district_id=district_id,
+            adjacency_dir = adjacency_dir,
+            district_buildings=district_buildings,
+            output_dir=output_dir
+        )
 
     except Exception as exc:  # pylint: disable=broad-except
         logger.error("Failed to update GeoPackage for district %d: %s", district_id, exc, exc_info=True)

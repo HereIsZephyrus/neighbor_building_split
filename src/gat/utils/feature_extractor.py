@@ -34,7 +34,7 @@ def extract_building_features(
     12. centroid_distance: Distance from district center (normalized)
     13. floor: Mean floor of the building
     14. degree: Number of neighboring buildings (added during graph construction)
-    
+
     Args:
         buildings_gdf: GeoDataFrame with building geometries
         normalize_spatial: If True, normalize centroid coordinates within district bounds

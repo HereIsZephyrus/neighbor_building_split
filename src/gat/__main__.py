@@ -3,7 +3,7 @@
 Usage:
     # Training
     python -m src.gat --train --adjacency-dir /path/to/voronoi --sample-buildings /path/to/buildings.shp --sample-districts /path/to/districts.shp --output-root-dir /path/to/output
- 
+
     # Inference
     python -m src.gat --inference --model-path models/final_model.pth --building-path /path/to/buildings.shp --adjacency-dir /path/to/voronoi --output-root-dir output/embeddings
 """
@@ -45,7 +45,7 @@ def parse_args():
     )
 
     # Training arguments
- 
+
     parser.add_argument(
         '--sample-buildings',
         type=str,
@@ -129,7 +129,7 @@ def main():
         if not args.output_root_dir:
             print("Error: --output-root-dir is required for training")
             sys.exit(1)
- 
+
         # Create a namespace with only training arguments
         train_args = argparse.Namespace(
             adjacency_dir=args.adjacency_dir,

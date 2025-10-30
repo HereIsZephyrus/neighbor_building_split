@@ -13,6 +13,7 @@ import pickle
 import torch
 import numpy as np
 import pandas as pd
+import geopandas as gpd
 from tqdm import tqdm
 
 from .models.gat import GAT
@@ -42,7 +43,7 @@ def parse_args():
         help='Directory containing adjacency matrices'
     )
     parser.add_argument(
-        '--building-shapefile',
+        '--building-path',
         type=str,
         required=True,
         help='Path to building shapefile'
@@ -153,7 +154,7 @@ def generate_embeddings_for_district(
         model: Trained GAT model
         district_id: District ID
         adjacency_dir: Data directory
-        building_shapefile: Path to building shapefile
+        building_path: Path to building shapefile
         device: Device
         scaler: Optional pre-fitted StandardScaler
         perform_clustering: Whether to perform spectral clustering
@@ -161,7 +162,7 @@ def generate_embeddings_for_district(
 
     Returns:
         Tuple of (embeddings, logits, gat_labels, spectral_clusters, 
-                  cluster_to_label, original_labels, num_nodes, n_clusters, scaler)
+                  cluster_to_label, original_labels, num_nodes, n_clusters, scaler, has_labels)
     """
     logger = get_logger()
 
@@ -204,12 +205,21 @@ def generate_embeddings_for_district(
         # Get GAT predicted labels
         gat_labels_np = torch.argmax(logits, dim=1).cpu().numpy()
 
-        true_num_clusters = int(data.num_clusters.item()) if hasattr(data, 'num_clusters') else None
+        # Check if ground truth labels exist
+        has_labels = getattr(data, 'has_labels', False)
 
-        logger.info(
-            "Generated embeddings for district %d: shape=%s, GAT predicted %d classes, true_clusters=%s",
-            district_id, embeddings_np.shape, len(np.unique(gat_labels_np)), true_num_clusters
-        )
+        # Log generation info
+        if has_labels:
+            true_num_clusters = int(data.num_clusters.item())
+            logger.info(
+                "Generated embeddings for district %d: shape=%s, GAT predicted %d classes, ground_truth=%d classes",
+                district_id, embeddings_np.shape, len(np.unique(gat_labels_np)), true_num_clusters
+            )
+        else:
+            logger.info(
+                "Generated embeddings for district %d: shape=%s, GAT predicted %d classes (no ground truth)",
+                district_id, embeddings_np.shape, len(np.unique(gat_labels_np))
+            )
 
         # Perform spectral clustering
         spectral_clusters = None
@@ -252,12 +262,13 @@ def generate_embeddings_for_district(
             original_labels_np, 
             data.num_nodes, 
             final_n_clusters,
-            scaler
+            scaler,
+            has_labels
         )
 
     except Exception as exc:  # pylint: disable=broad-except
         logger.error("Failed to generate embeddings for district %d: %s", district_id, exc, exc_info=True)
-        return None, None, None, None, None, None, 0, None, scaler
+        return None, None, None, None, None, None, 0, None, scaler, False
 
 
 def save_embeddings(
@@ -269,7 +280,8 @@ def save_embeddings(
     output_dir: Path,
     spectral_clusters: Optional[np.ndarray] = None,
     cluster_to_label: Optional[dict] = None,
-    predicted_num_clusters: Optional[int] = None
+    predicted_num_clusters: Optional[int] = None,
+    has_ground_truth: bool = False
 ) -> None:
     """
     Save embeddings and clustering results to pickle file.
@@ -278,12 +290,13 @@ def save_embeddings(
         embeddings: GAT node embeddings (N, D)
         logits: GAT classification logits (N, num_classes)
         gat_labels: GAT predicted labels (N,)
-        original_labels: Original ground truth labels (N,)
+        original_labels: Original labels (N,) - dummy zeros if no ground truth
         district_id: District ID
         output_dir: Output directory
         spectral_clusters: Spectral cluster assignments (N,)
         cluster_to_label: Mapping from cluster ID to GAT label
         predicted_num_clusters: Number of clusters detected/predicted
+        has_ground_truth: Whether ground truth labels exist
     """
     output_dir.mkdir(parents=True, exist_ok=True)
 
@@ -293,25 +306,137 @@ def save_embeddings(
         'embeddings': embeddings,
         'logits': logits,
         'gat_labels': gat_labels,
-        'original_labels': original_labels,
         'spectral_clusters': spectral_clusters,
         'cluster_to_label': cluster_to_label,
         'district_id': district_id,
         'num_nodes': len(embeddings),
         'embedding_dim': embeddings.shape[1],
-        'predicted_num_clusters': predicted_num_clusters
+        'predicted_num_clusters': predicted_num_clusters,
+        'has_ground_truth': has_ground_truth
     }
+
+    # Only save original labels if ground truth exists
+    if has_ground_truth:
+        data['original_labels'] = original_labels
 
     with open(output_file, 'wb') as f:
         pickle.dump(data, f)
 
     logger = get_logger()
-    logger.info("Embeddings and clustering results saved to %s", output_file)
+    mode_str = " (with ground truth)" if has_ground_truth else " (inference only)"
+    logger.info("Embeddings and clustering results%s saved to %s", mode_str, output_file)
+
+
+def update_gpkg_with_district(
+    district_id: int,
+    predictions: dict,
+    building_path: Path,
+    adjacency_dir: Path,
+    output_dir: Path
+) -> None:
+    """
+    Update GeoPackage file with predictions for a single district.
+    Uses append mode to incrementally update the file.
+
+    Args:
+        district_id: District ID
+        predictions: Prediction data for this district
+        building_path: Path to original building shapefile
+        adjacency_dir: Directory containing adjacency matrices
+        output_dir: Output directory for GeoPackage
+    """
+    logger = get_logger()
+
+    try:
+        # Load building shapefile
+        buildings_gdf = gpd.read_file(building_path)
+
+        # Find building ID field
+        id_field = None
+        for possible_id in ['FID', 'OBJECTID', 'ID', 'id', 'fid', 'building_id']:
+            if possible_id in buildings_gdf.columns:
+                id_field = possible_id
+                break
+
+        if id_field is None:
+            buildings_gdf['building_id'] = buildings_gdf.index
+            id_field = 'building_id'
+
+        # Load adjacency matrix to get building IDs for this district
+        adjacency_path = adjacency_dir / f"district_{district_id}_adjacency.pkl"
+        if not adjacency_path.exists():
+            logger.warning("Adjacency file not found for district %d", district_id)
+            return
+
+        adjacency_matrix = pd.read_pickle(adjacency_path)
+        building_ids = adjacency_matrix.index.tolist()
+
+        # Get predictions for this district
+        gat_labels = predictions['gat_labels']
+        spectral_clusters = predictions.get('spectral_clusters')
+
+        # Create mapping for this district's buildings
+        building_predictions = {}
+        for idx, bid in enumerate(building_ids):
+            if idx < len(gat_labels):
+                building_predictions[bid] = {
+                    'district_id': district_id,
+                    'gat_label': int(gat_labels[idx]),
+                    'spectral_cluster': int(spectral_clusters[idx]) if spectral_clusters is not None else None
+                }
+
+        # Filter buildings to only those in this district
+        district_building_ids = list(building_predictions.keys())
+        district_buildings = buildings_gdf[buildings_gdf[id_field].isin(district_building_ids)].copy()
+
+        if len(district_buildings) == 0:
+            logger.warning("No buildings found for district %d", district_id)
+            return
+
+        # Add prediction columns
+        district_buildings['district_id'] = district_id
+        district_buildings['gat_label'] = district_buildings[id_field].map(
+            lambda x: building_predictions.get(x, {}).get('gat_label')
+        )
+        district_buildings['spectral_cluster'] = district_buildings[id_field].map(
+            lambda x: building_predictions.get(x, {}).get('spectral_cluster')
+        )
+
+        # Convert to appropriate types
+        district_buildings['district_id'] = district_buildings['district_id'].astype('Int64')
+        district_buildings['gat_label'] = district_buildings['gat_label'].astype('Int64')
+        if district_buildings['spectral_cluster'].notna().any():
+            district_buildings['spectral_cluster'] = district_buildings['spectral_cluster'].astype('Int64')
+
+        # Save to GeoPackage (append mode if file exists)
+        output_file = output_dir / 'building_predictions.gpkg'
+
+        if output_file.exists():
+            # Append to existing file
+            existing_gdf = gpd.read_file(output_file)
+
+            # Remove any existing records for this district (in case of re-run)
+            existing_gdf = existing_gdf[existing_gdf['district_id'] != district_id]
+
+            # Combine with new data
+            combined_gdf = pd.concat([existing_gdf, district_buildings], ignore_index=True)
+            combined_gdf.to_file(output_file, driver='GPKG')
+
+            logger.info("Updated GeoPackage with district %d: %d buildings (total: %d buildings)", 
+                       district_id, len(district_buildings), len(combined_gdf))
+        else:
+            # Create new file
+            district_buildings.to_file(output_file, driver='GPKG')
+            logger.info("Created GeoPackage with district %d: %d buildings", 
+                       district_id, len(district_buildings))
+
+    except Exception as exc:  # pylint: disable=broad-except
+        logger.error("Failed to update GeoPackage for district %d: %s", district_id, exc, exc_info=True)
 
 
 def main(args=None):
     """Main inference function.
- 
+
     Args:
         args: Optional argparse.Namespace. If None, will parse from sys.argv.
     """
@@ -378,7 +503,7 @@ def main(args=None):
         )
 
         (embeddings, logits, gat_labels, spectral_clusters, 
-         cluster_to_label, original_labels, num_nodes, n_clusters, scaler) = result
+         cluster_to_label, original_labels, num_nodes, n_clusters, scaler, has_labels) = result
 
         if embeddings is not None:
             # Save embeddings and clustering results
@@ -391,19 +516,34 @@ def main(args=None):
                 output_dir=output_dir,
                 spectral_clusters=spectral_clusters,
                 cluster_to_label=cluster_to_label,
-                predicted_num_clusters=n_clusters
+                predicted_num_clusters=n_clusters,
+                has_ground_truth=has_labels
             )
 
-            all_embeddings[district_id] = {
+            embeddings_dict = {
                 'embeddings': embeddings,
                 'logits': logits,
                 'gat_labels': gat_labels,
-                'original_labels': original_labels,
                 'spectral_clusters': spectral_clusters,
                 'cluster_to_label': cluster_to_label,
                 'num_nodes': num_nodes,
-                'predicted_num_clusters': n_clusters
+                'predicted_num_clusters': n_clusters,
+                'has_ground_truth': has_labels
             }
+            # Only include original labels if ground truth exists
+            if has_labels:
+                embeddings_dict['original_labels'] = original_labels
+
+            all_embeddings[district_id] = embeddings_dict
+
+            # Incrementally update GeoPackage with this district's predictions
+            update_gpkg_with_district(
+                district_id=district_id,
+                predictions=embeddings_dict,
+                building_path=building_path,
+                adjacency_dir=adjacency_dir,
+                output_dir=output_dir
+            )
 
     # Save summary
     summary = {
@@ -416,6 +556,19 @@ def main(args=None):
     summary_file = output_dir / 'embeddings_summary.pkl'
     with open(summary_file, 'wb') as f:
         pickle.dump(summary, f)
+
+    # Log final GeoPackage info
+    gpkg_file = output_dir / 'building_predictions.gpkg'
+    if gpkg_file.exists():
+        final_gdf = gpd.read_file(gpkg_file)
+        logger.info("=" * 80)
+        logger.info("GeoPackage Summary:")
+        logger.info("  - Total buildings: %d", len(final_gdf))
+        logger.info("  - Districts: %s", sorted(final_gdf['district_id'].unique().tolist()))
+        logger.info("  - GAT labels: %d unique classes", final_gdf['gat_label'].nunique())
+        if final_gdf['spectral_cluster'].notna().any():
+            logger.info("  - Spectral clusters: %d unique clusters", final_gdf['spectral_cluster'].nunique())
+        logger.info("  - File: %s", gpkg_file)
 
     logger.info("=" * 80)
     logger.info("Embedding generation completed!")

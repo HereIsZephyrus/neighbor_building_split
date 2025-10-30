@@ -69,13 +69,13 @@ def parse_args():
 
 def main(args=None):
     """Main training function.
- 
+
     Args:
         args: Optional argparse.Namespace. If None, will parse from sys.argv.
     """
     if args is None:
         args = parse_args()
- 
+
     # Determine config path
     if args.config:
         config_path = Path(args.config)

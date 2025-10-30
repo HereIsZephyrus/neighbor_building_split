@@ -106,12 +106,14 @@ def load_district_graph(
         labels = buildings_gdf[label_field].values - 1  # Convert 1-based to 0-based
         y = torch.tensor(labels, dtype=torch.long)
         num_clusters = len(np.unique(labels))
+        has_labels = True
         logger.debug(f"Found labels: {num_clusters} classes (converted from 1-based to 0-based)")
     else:
-        # No labels available
+        # No labels available - inference mode
         y = torch.zeros(len(buildings_gdf), dtype=torch.long)
-        num_clusters = 1
-        logger.warning(f"No label field found in district {district_id}")
+        num_clusters = 0  # Indicate no ground truth labels
+        has_labels = False
+        logger.debug(f"No label field found in district {district_id} (inference mode)")
 
     # Create PyG Data object
     data = Data(
@@ -121,7 +123,8 @@ def load_district_graph(
         y=y,
         num_nodes=len(buildings_gdf),
         district_id=district_id,
-        num_clusters=torch.tensor([num_clusters], dtype=torch.float)
+        num_clusters=torch.tensor([num_clusters], dtype=torch.float),
+        has_labels=has_labels  # Flag to indicate if ground truth labels exist
     )
 
     logger.info(f"Loaded district {district_id}: {data.num_nodes} nodes, {data.edge_index.shape[1]} edges")

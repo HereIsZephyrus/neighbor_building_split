@@ -16,7 +16,7 @@ def extract_building_features(
     normalize_spatial: bool = True
 ) -> np.ndarray:
     """
-    Extract 12 geometric and shape features from building geometries.
+    Extract 13 geometric and shape features from building geometries.
 
     Features extracted:
     1. area: Building footprint area
@@ -31,16 +31,16 @@ def extract_building_features(
     10. num_vertices: Number of polygon vertices
     11. perimeter_area_ratio: perimeter / sqrt(area)
     12. centroid_distance: Distance from district center (normalized)
-
+    13. floor: Mean floor of the building
     Args:
         buildings_gdf: GeoDataFrame with building geometries
         normalize_spatial: If True, normalize centroid coordinates within district bounds
 
     Returns:
-        numpy array of shape (N, 12) with extracted features
+        numpy array of shape (N, 13) with extracted features
     """
     n_buildings = len(buildings_gdf)
-    features = np.zeros((n_buildings, 12))
+    features = np.zeros((n_buildings, 13))
 
     # Compute district bounds for spatial normalization
     if normalize_spatial:

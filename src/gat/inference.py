@@ -1,22 +1,24 @@
 """Inference script for generating embeddings from trained GAT model.
 
 Usage:
-    python -m src.gat.inference --checkpoint models/gat/best_model.pth --output-dir output/embeddings
+    python -m src.gat.inference --checkpoint models/gat/best_model.pth --output-root-dir output/embeddings
 """
 
 import argparse
 import sys
 from pathlib import Path
-from typing import List
+from typing import List, Optional
 import pickle
 
 import torch
 import numpy as np
+import pandas as pd
 from tqdm import tqdm
 
 from .models.gat import GAT
 from .data.data_utils import load_district_graph
 from .utils.logger import setup_logger, get_logger
+from .utils.spectral_clustering import perform_spectral_clustering_pipeline
 
 
 def parse_args():
@@ -34,7 +36,7 @@ def parse_args():
         help='Path to trained model checkpoint'
     )
     parser.add_argument(
-        '--data-dir',
+        '--adjacency-dir',
         type=str,
         default='output/voronoi',
         help='Directory containing adjacency matrices'
@@ -48,7 +50,7 @@ def parse_args():
 
     # Optional arguments
     parser.add_argument(
-        '--output-dir',
+        '--output-root-dir',
         type=str,
         default='output/gat/embeddings',
         help='Directory to save embeddings'
@@ -91,7 +93,7 @@ def auto_detect_district_ids(data_dir: Path) -> List[int]:
     return district_ids
 
 
-def load_model_from_checkpoint(checkpoint_path: Path, device: str) -> tuple:
+def load_model_from_file(checkpoint_path: Path, device: str) -> tuple:
     """
     Load model from checkpoint.
 
@@ -103,7 +105,7 @@ def load_model_from_checkpoint(checkpoint_path: Path, device: str) -> tuple:
         Tuple of (model, config)
     """
     logger = get_logger()
-    logger.info(f"Loading checkpoint from {checkpoint_path}")
+    logger.info("Loading checkpoint from %s", checkpoint_path)
 
     checkpoint = torch.load(checkpoint_path, map_location=device)
 
@@ -113,7 +115,7 @@ def load_model_from_checkpoint(checkpoint_path: Path, device: str) -> tuple:
 
     # Create model
     model = GAT(
-        in_features=model_config.get('in_features', 12),
+        in_features=model_config.get('in_features', 13),
         hidden_dim=model_config.get('hidden_dim', 64),
         num_classes=model_config.get('num_classes', 3),
         num_layers=model_config.get('num_layers', 3),
@@ -128,8 +130,8 @@ def load_model_from_checkpoint(checkpoint_path: Path, device: str) -> tuple:
     model.to(device)
     model.eval()
 
-    logger.info(f"Model loaded from epoch {checkpoint.get('epoch', 'unknown')}")
-    logger.info(f"Model:\n{model}")
+    logger.info("Model loaded from epoch %s", checkpoint.get('epoch', 'unknown'))
+    logger.info("Model:\n%s", model)
 
     return model, config_dict
 
@@ -137,79 +139,151 @@ def load_model_from_checkpoint(checkpoint_path: Path, device: str) -> tuple:
 def generate_embeddings_for_district(
     model: GAT,
     district_id: int,
-    data_dir: Path,
-    building_shapefile: Path,
+    adjacency_dir: Path,
+    building_path: Path,
     device: str,
-    scaler=None
+    scaler=None,
+    perform_clustering: bool = True,
+    n_clusters: Optional[int] = None
 ) -> tuple:
     """
-    Generate embeddings for a single district.
+    Generate embeddings for a single district and optionally perform spectral clustering.
 
     Args:
         model: Trained GAT model
         district_id: District ID
-        data_dir: Data directory
+        adjacency_dir: Data directory
         building_shapefile: Path to building shapefile
         device: Device
         scaler: Optional pre-fitted StandardScaler
+        perform_clustering: Whether to perform spectral clustering
+        n_clusters: Number of clusters (auto-estimate if None)
 
     Returns:
-        Tuple of (embeddings, labels, num_nodes)
+        Tuple of (embeddings, logits, gat_labels, spectral_clusters, 
+                  cluster_to_label, original_labels, num_nodes, n_clusters, scaler)
     """
     logger = get_logger()
 
     try:
-        # Load district data
+        # Load district data (normalized features)
         data, scaler = load_district_graph(
             district_id=district_id,
-            data_dir=data_dir,
-            building_shapefile_path=building_shapefile,
+            adjacency_dir=adjacency_dir,
+            building_path=building_path,
             normalize_features=True,
             scaler=scaler
         )
 
+        # Also load unnormalized data to get original features
+        data_unnorm, _ = load_district_graph(
+            district_id=district_id,
+            adjacency_dir=adjacency_dir,
+            building_path=building_path,
+            normalize_features=False,
+            scaler=None
+        )
+        original_features = data_unnorm.x.numpy()
+
+        # Load adjacency matrix
+        adjacency_path = adjacency_dir / f"district_{district_id}_adjacency.pkl"
+        adjacency_matrix = pd.read_pickle(adjacency_path)
+
         # Move to device
         data = data.to(device)
 
-        # Generate embeddings and predict cluster count
+        # GAT forward pass: get logits and embeddings
         with torch.no_grad():
-            embeddings, num_clusters_pred = model.forward_inference(data.x, data.edge_index)
+            logits, embeddings = model.forward_inference(data.x, data.edge_index)
 
         # Convert to numpy
         embeddings_np = embeddings.cpu().numpy()
-        labels_np = data.y.cpu().numpy()
-        num_clusters_pred_val = int(torch.round(num_clusters_pred).item())
+        logits_np = logits.cpu().numpy()
+        original_labels_np = data.y.cpu().numpy()
+
+        # Get GAT predicted labels
+        gat_labels_np = torch.argmax(logits, dim=1).cpu().numpy()
+
         true_num_clusters = int(data.num_clusters.item()) if hasattr(data, 'num_clusters') else None
 
         logger.info(
-            f"Generated embeddings for district {district_id}: "
-            f"shape={embeddings_np.shape}, labels={len(np.unique(labels_np))} classes, "
-            f"predicted_clusters={num_clusters_pred_val}, true_clusters={true_num_clusters}"
+            "Generated embeddings for district %d: shape=%s, GAT predicted %d classes, true_clusters=%s",
+            district_id, embeddings_np.shape, len(np.unique(gat_labels_np)), true_num_clusters
         )
 
-        return embeddings_np, labels_np, data.num_nodes, num_clusters_pred_val, scaler
+        # Perform spectral clustering
+        spectral_clusters = None
+        cluster_to_label = None
+        final_n_clusters = n_clusters
 
-    except Exception as e:
-        logger.error(f"Failed to generate embeddings for district {district_id}: {e}")
-        return None, None, 0, None, scaler
+        if perform_clustering:
+            try:
+                spectral_clusters, _, cluster_to_label, _ = perform_spectral_clustering_pipeline(
+                    embeddings=embeddings_np,
+                    features=original_features,
+                    adjacency_matrix=adjacency_matrix,
+                    gat_labels=gat_labels_np,
+                    n_clusters=n_clusters,
+                    embedding_weight=0.5,
+                    feature_weight=0.3,
+                    distance_weight=0.2,
+                    distance_scale=100.0,  # Adjust based on distance units
+                    random_state=42
+                )
+
+                final_n_clusters = len(np.unique(spectral_clusters))
+
+                logger.info(
+                    "Spectral clustering completed for district %d: %d clusters, cluster_to_label=%s",
+                    district_id, final_n_clusters, cluster_to_label
+                )
+
+            except Exception as exc:  # pylint: disable=broad-except
+                logger.error("Spectral clustering failed for district %d: %s", district_id, exc, exc_info=True)
+                spectral_clusters = None
+                cluster_to_label = None
+
+        return (
+            embeddings_np, 
+            logits_np, 
+            gat_labels_np, 
+            spectral_clusters, 
+            cluster_to_label,
+            original_labels_np, 
+            data.num_nodes, 
+            final_n_clusters,
+            scaler
+        )
+
+    except Exception as exc:  # pylint: disable=broad-except
+        logger.error("Failed to generate embeddings for district %d: %s", district_id, exc, exc_info=True)
+        return None, None, None, None, None, None, 0, None, scaler
 
 
 def save_embeddings(
     embeddings: np.ndarray,
-    labels: np.ndarray,
+    logits: np.ndarray,
+    gat_labels: np.ndarray,
+    original_labels: np.ndarray,
     district_id: int,
     output_dir: Path,
-    predicted_num_clusters: int = None
+    spectral_clusters: Optional[np.ndarray] = None,
+    cluster_to_label: Optional[dict] = None,
+    predicted_num_clusters: Optional[int] = None
 ) -> None:
     """
-    Save embeddings to pickle file.
+    Save embeddings and clustering results to pickle file.
 
     Args:
-        embeddings: Node embeddings (N, D)
-        labels: Node labels (N,)
+        embeddings: GAT node embeddings (N, D)
+        logits: GAT classification logits (N, num_classes)
+        gat_labels: GAT predicted labels (N,)
+        original_labels: Original ground truth labels (N,)
         district_id: District ID
         output_dir: Output directory
-        predicted_num_clusters: Predicted number of clusters
+        spectral_clusters: Spectral cluster assignments (N,)
+        cluster_to_label: Mapping from cluster ID to GAT label
+        predicted_num_clusters: Number of clusters detected/predicted
     """
     output_dir.mkdir(parents=True, exist_ok=True)
 
@@ -217,7 +291,11 @@ def save_embeddings(
 
     data = {
         'embeddings': embeddings,
-        'labels': labels,
+        'logits': logits,
+        'gat_labels': gat_labels,
+        'original_labels': original_labels,
+        'spectral_clusters': spectral_clusters,
+        'cluster_to_label': cluster_to_label,
         'district_id': district_id,
         'num_nodes': len(embeddings),
         'embedding_dim': embeddings.shape[1],
@@ -228,30 +306,35 @@ def save_embeddings(
         pickle.dump(data, f)
 
     logger = get_logger()
-    logger.info(f"Embeddings saved to {output_file}")
+    logger.info("Embeddings and clustering results saved to %s", output_file)
 
 
-def main():
-    """Main inference function."""
-    args = parse_args()
+def main(args=None):
+    """Main inference function.
+ 
+    Args:
+        args: Optional argparse.Namespace. If None, will parse from sys.argv.
+    """
+    if args is None:
+        args = parse_args()
 
     # Setup paths
-    checkpoint_path = Path(args.checkpoint)
-    data_dir = Path(args.data_dir)
-    building_shapefile = Path(args.building_shapefile)
-    output_dir = Path(args.output_dir)
+    model_path = Path(args.model_path)
+    adjacency_dir = Path(args.adjacency_dir)
+    building_path = Path(args.building_path)
+    output_dir = Path(args.output_root_dir) / "predicted"
 
     # Validate paths
-    if not checkpoint_path.exists():
-        print(f"Error: Checkpoint not found: {checkpoint_path}")
+    if not model_path.exists():
+        print(f"Error: Model path not found: {model_path}")
         sys.exit(1)
 
-    if not data_dir.exists():
-        print(f"Error: Data directory not found: {data_dir}")
+    if not adjacency_dir.exists():
+        print(f"Error: Data directory not found: {adjacency_dir}")
         sys.exit(1)
 
-    if not building_shapefile.exists():
-        print(f"Error: Building shapefile not found: {building_shapefile}")
+    if not building_path.exists():
+        print(f"Error: Building path not found: {building_path}")
         sys.exit(1)
 
     # Setup logger
@@ -262,41 +345,64 @@ def main():
     logger.info("=" * 80)
     logger.info("GAT Inference: Generating Embeddings")
     logger.info("=" * 80)
-    logger.info(f"Checkpoint: {checkpoint_path}")
-    logger.info(f"Data directory: {data_dir}")
-    logger.info(f"Output directory: {output_dir}")
-    logger.info(f"Device: {args.device}")
+    logger.info("Model path: %s", model_path)
+    logger.info("Adjacency directory: %s", adjacency_dir)
+    logger.info("Output directory: %s", output_dir)
+    logger.info("Device: %s", args.device)
 
     # Load model
-    model, config = load_model_from_checkpoint(checkpoint_path, args.device)
+    model, _ = load_model_from_file(model_path, args.device)
 
-    district_ids = get_building_district_ids(building_shapefile)
+    # Get district IDs
+    if args.district_ids:
+        district_ids = args.district_ids
+    else:
+        district_ids = auto_detect_district_ids(adjacency_dir)
 
-    logger.info(f"Processing {len(district_ids)} districts: {district_ids}")
+    logger.info("Processing %d districts.", len(district_ids))
 
     # Generate embeddings for each district
     all_embeddings = {}
     scaler = None  # Will be fitted on first district, then reused
 
-    for district_id in tqdm(district_ids, desc="Generating embeddings"):
-        embeddings, labels, num_nodes, predicted_num_clusters, scaler = generate_embeddings_for_district(
+    for district_id in tqdm(district_ids, desc="Generating embeddings and clustering"):
+        result = generate_embeddings_for_district(
             model=model,
             district_id=district_id,
-            data_dir=data_dir,
-            building_shapefile=building_shapefile,
+            adjacency_dir=adjacency_dir,
+            building_path=building_path,
             device=args.device,
-            scaler=scaler
+            scaler=scaler,
+            perform_clustering=True,
+            n_clusters=None  # Auto-detect optimal number
         )
 
+        (embeddings, logits, gat_labels, spectral_clusters, 
+         cluster_to_label, original_labels, num_nodes, n_clusters, scaler) = result
+
         if embeddings is not None:
-            # Save embeddings
-            save_embeddings(embeddings, labels, district_id, output_dir, predicted_num_clusters)
+            # Save embeddings and clustering results
+            save_embeddings(
+                embeddings=embeddings,
+                logits=logits,
+                gat_labels=gat_labels,
+                original_labels=original_labels,
+                district_id=district_id,
+                output_dir=output_dir,
+                spectral_clusters=spectral_clusters,
+                cluster_to_label=cluster_to_label,
+                predicted_num_clusters=n_clusters
+            )
 
             all_embeddings[district_id] = {
                 'embeddings': embeddings,
-                'labels': labels,
+                'logits': logits,
+                'gat_labels': gat_labels,
+                'original_labels': original_labels,
+                'spectral_clusters': spectral_clusters,
+                'cluster_to_label': cluster_to_label,
                 'num_nodes': num_nodes,
-                'predicted_num_clusters': predicted_num_clusters
+                'predicted_num_clusters': n_clusters
             }
 
     # Save summary
@@ -313,10 +419,10 @@ def main():
 
     logger.info("=" * 80)
     logger.info("Embedding generation completed!")
-    logger.info(f"Processed {summary['num_districts']} districts")
-    logger.info(f"Total nodes: {summary['total_nodes']}")
-    logger.info(f"Embedding dimension: {summary['embedding_dim']}")
-    logger.info(f"Summary saved to {summary_file}")
+    logger.info("Processed %d districts", summary['num_districts'])
+    logger.info("Total nodes: %d", summary['total_nodes'])
+    logger.info("Embedding dimension: %d", summary['embedding_dim'])
+    logger.info("Summary saved to %s", summary_file)
     logger.info("=" * 80)
 
 

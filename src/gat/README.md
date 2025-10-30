@@ -45,12 +45,12 @@ Train GAT model on building graphs:
 ```bash
 # Basic training
 python -m src.gat \
-    --data-dir output/voronoi \
+    --adjacency-dir output/voronoi \
     --building-shapefile path/to/buildings.shp
 
 # Advanced options
 python -m src.gat \
-    --data-dir output/voronoi \
+    --adjacency-dir output/voronoi \
     --building-shapefile path/to/buildings.shp \
     --hidden-dim 64 \
     --num-layers 3 \
@@ -77,9 +77,9 @@ Generate embeddings for downstream clustering:
 ```bash
 python -m src.gat.inference \
     --checkpoint models/gat/best_model.pth \
-    --data-dir output/voronoi \
+    --adjacency-dir output/voronoi \
     --building-shapefile path/to/buildings.shp \
-    --output-dir output/gat/embeddings
+    --output-root-dir output/gat/embeddings
 ```
 
 This creates:

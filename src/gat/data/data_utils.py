@@ -18,8 +18,8 @@ logger = get_logger()
 
 def load_district_graph(
     district_id: int,
-    data_dir: Path,
-    building_shapefile_path: Path,
+    adjacency_dir: Path,
+    building_path: Path,
     normalize_features: bool = True,
     scaler: Optional[StandardScaler] = None
 ) -> Tuple[Data, StandardScaler]:
@@ -28,8 +28,8 @@ def load_district_graph(
 
     Args:
         district_id: District ID
-        data_dir: Directory containing voronoi output (adjacency matrices)
-        building_shapefile_path: Path to building shapefile
+        adjacency_dir: Directory containing voronoi output (adjacency matrices)
+        building_path: Path to building shapefile
         normalize_features: Whether to normalize features
         scaler: Optional pre-fitted StandardScaler
 
@@ -40,7 +40,7 @@ def load_district_graph(
     logger.debug(f"Loading district {district_id}...")
 
     # Load similarity/adjacency matrix
-    sim_matrix_path = data_dir / f"district_{district_id}_adjacency.pkl"
+    sim_matrix_path = adjacency_dir / f"district_{district_id}_adjacency.pkl"
 
     if not sim_matrix_path.exists():
         raise FileNotFoundError(f"Similarity matrix not found: {sim_matrix_path}")
@@ -49,7 +49,7 @@ def load_district_graph(
     logger.debug(f"Loaded similarity matrix: shape={sim_matrix.shape}")
 
     # Load building shapefile
-    buildings_gdf = gpd.read_file(building_shapefile_path)
+    buildings_gdf = gpd.read_file(building_path)
 
     # Filter buildings to match those in similarity matrix
     building_ids_in_matrix = sim_matrix.index.tolist()
@@ -229,8 +229,8 @@ def create_train_val_masks(
 
 def load_multiple_districts(
     district_ids: List[int],
-    data_dir: Path,
-    building_shapefile_path: Path,
+    adjacency_dir: Path,
+    building_path: Path,
     normalize_features: bool = True
 ) -> Tuple[List[Data], StandardScaler]:
     """
@@ -238,8 +238,8 @@ def load_multiple_districts(
 
     Args:
         district_ids: List of district IDs
-        data_dir: Directory containing voronoi output
-        building_shapefile_path: Path to building shapefile
+        adjacency_dir: Directory containing voronoi output
+        building_path: Path to building shapefile
         normalize_features: Whether to normalize features
 
     Returns:
@@ -255,7 +255,7 @@ def load_multiple_districts(
     for district_id in district_ids:
         try:
             data, _ = load_district_graph(
-                district_id, data_dir, building_shapefile_path,
+                district_id, adjacency_dir, building_path,
                 normalize_features=False
             )
             data_list.append(data)

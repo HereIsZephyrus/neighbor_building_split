@@ -180,6 +180,8 @@ class Trainer:
 
                     # Gradient accumulation
                     if (batch_count + 1) % self.config.gradient_accumulation_steps == 0:
+                        # Gradient clipping to prevent gradient explosion
+                        torch.nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=1.0)
                         self.optimizer.step()
                         self.optimizer.zero_grad()
 
@@ -201,6 +203,8 @@ class Trainer:
 
                 # Final optimizer step if needed
                 if batch_count % self.config.gradient_accumulation_steps != 0:
+                    # Gradient clipping to prevent gradient explosion
+                    torch.nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=1.0)
                     self.optimizer.step()
                     self.optimizer.zero_grad()
 
@@ -228,6 +232,8 @@ class Trainer:
 
                 # Backward pass
                 loss.backward()
+                # Gradient clipping to prevent gradient explosion
+                torch.nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=1.0)
                 self.optimizer.step()
 
                 # Metrics
@@ -416,7 +422,9 @@ class Trainer:
                     break
 
         # Save final checkpoint
-        final_checkpoint_path = Path(self.config.checkpoint_dir) / 'final_model.pth'
+        final_model_dir = Path(self.config.output_root_dir) / 'models'
+        final_model_dir.mkdir(parents=True, exist_ok=True)
+        final_checkpoint_path = final_model_dir / 'final_model.pth'
         save_checkpoint(
             self.model,
             self.optimizer,

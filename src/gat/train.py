@@ -8,6 +8,8 @@ import argparse
 import sys
 from pathlib import Path
 from datetime import datetime
+import shutil
+import yaml
 
 from .training import GATConfig, Trainer
 from .models.gat import GAT
@@ -94,9 +96,11 @@ def main(args=None):
         'district_path': args.sample_districts,
         'adjacency_dir': args.adjacency_dir,
         'output_root_dir': args.output_root_dir,
+        'model_identifier': getattr(args, 'model_identifier', 'default'),
     }
     config = GATConfig.from_yaml(config_path, resource_path=resource_path)
     print(f"Loaded configuration from {config_path}")
+    print(f"Model identifier: {config.model_identifier}")
 
     if not Path(config.adjacency_dir).exists():
         print(f"Error: Data directory not found: {config.adjacency_dir}")
@@ -118,8 +122,22 @@ def main(args=None):
     print(f"  - Logs: {config.log_dir}")
     print(f"  - Embeddings: {config.output_dir}")
 
+    # Save training config to output directory for reference
+    config_backup_path = Path(config.output_root_dir) / f'training_config_{config.model_identifier}.yaml'
+    try:
+        shutil.copy(config_path, config_backup_path)
+        print(f"Training config saved to: {config_backup_path}")
+        
+        # Also save the full config as a dict for easier inspection
+        config_dict_path = Path(config.output_root_dir) / f'config_dict_{config.model_identifier}.yaml'
+        with open(config_dict_path, 'w', encoding='utf-8') as f:
+            yaml.dump(config.to_dict(), f, default_flow_style=False, allow_unicode=True)
+        print(f"Config dict saved to: {config_dict_path}")
+    except Exception as exc:
+        print(f"Warning: Failed to save config backup: {exc}")
+
     # Setup logger
-    log_file = Path(config.log_dir) / f"training_{datetime.now().strftime('%Y%m%d_%H%M%S')}.log"
+    log_file = Path(config.log_dir) / f"{config.model_identifier}_training_{datetime.now().strftime('%Y%m%d_%H%M%S')}.log"
     logger = setup_logger(name='gat', log_file=log_file)
 
     logger.info("=" * 80)

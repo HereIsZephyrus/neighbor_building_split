@@ -490,7 +490,27 @@ def main(args=None):
     all_embeddings = {}
     scaler = None  # Will be fitted on first district, then reused
 
+    # Check if resume mode is enabled
+    resume_mode = getattr(args, 'resume', None) is not None
+    if resume_mode:
+        logger.info("Resume mode enabled: will skip districts with existing pkl files in %s", output_dir)
+
     for district_id in tqdm(district_ids, desc="Generating embeddings and clustering"):
+        # Check if this district has already been processed (for resume mode)
+        output_pkl = output_dir / f'district_{district_id}_embeddings.pkl'
+        if resume_mode and output_pkl.exists():
+            logger.info("Skipping district %d (already processed, found %s)", district_id, output_pkl)
+
+            # Load existing embeddings to include in summary
+            try:
+                with open(output_pkl, 'rb') as f:
+                    existing_data = pickle.load(f)
+                all_embeddings[district_id] = existing_data
+            except Exception as exc:  # pylint: disable=broad-except
+                logger.warning("Failed to load existing embeddings for district %d: %s", district_id, exc)
+
+            continue
+
         result = generate_embeddings_for_district(
             model=model,
             district_id=district_id,
@@ -581,4 +601,3 @@ def main(args=None):
 
 if __name__ == '__main__':
     main()
-

@@ -403,7 +403,7 @@ class Trainer:
                 is_best = True
 
             if epoch % self.config.checkpoint_interval == 0 or is_best:
-                checkpoint_path = Path(self.config.checkpoint_dir) / f'checkpoint_epoch_{epoch}.pth'
+                checkpoint_path = Path(self.config.checkpoint_dir) / f'{self.config.model_identifier}_checkpoint_epoch_{epoch}.pth'
                 save_checkpoint(
                     self.model,
                     self.optimizer,
@@ -424,7 +424,7 @@ class Trainer:
         # Save final checkpoint
         final_model_dir = Path(self.config.output_root_dir) / 'models'
         final_model_dir.mkdir(parents=True, exist_ok=True)
-        final_checkpoint_path = final_model_dir / 'final_model.pth'
+        final_checkpoint_path = final_model_dir / f'{self.config.model_identifier}_final_model.pth'
         save_checkpoint(
             self.model,
             self.optimizer,
@@ -436,7 +436,7 @@ class Trainer:
         )
 
         # Save training history
-        history_path = Path(self.config.checkpoint_dir) / 'training_history.json'
+        history_path = Path(self.config.checkpoint_dir) / f'{self.config.model_identifier}_training_history.json'
         save_training_history(self.history, history_path)
 
         # Close TensorBoard writer

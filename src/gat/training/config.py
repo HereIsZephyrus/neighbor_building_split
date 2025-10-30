@@ -45,6 +45,7 @@ class GATConfig:
     building_path: str = ""
     district_path: str = ""
     output_root_dir: str = ""
+    model_identifier: str = "default"  # Model version identifier
 
     # subdirectories Path
     checkpoint_dir: str = "models"  # Model checkpoints
@@ -111,6 +112,7 @@ class GATConfig:
             },
             'device': self.device,
             'seed': self.seed,
+            'model_identifier': self.model_identifier,
         }
 
     def __repr__(self):
@@ -189,5 +191,5 @@ class GATConfig:
         # Construct output subdirectories based on output_dir
         params['checkpoint_dir'] = f"{params['output_root_dir']}/checkpoints"
         params['log_dir'] = f"{params['output_root_dir']}/logs"
-        params['output_dir'] = f"{params['output_root_dir']}/output"
+        params['output_dir'] = f"{params['output_root_dir']}/output_{params['model_identifier']}"
         return cls(**params)

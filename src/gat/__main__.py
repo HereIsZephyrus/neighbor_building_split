@@ -43,6 +43,18 @@ def parse_args():
         type=str,
         help='Directory for all outputs (checkpoints, logs, embeddings)'
     )
+    parser.add_argument(
+        '--model-identifier',
+        type=str,
+        default='default',
+        help='Model identifier for output directory (e.g., v1, v2, etc.)'
+    )
+    parser.add_argument(
+        '--resume',
+        type=str,
+        default=None,
+        help='Path to checkpoint to resume from'
+    )
 
     # Training arguments
 
@@ -61,12 +73,6 @@ def parse_args():
         type=str,
         default=None,
         help='Path to training config YAML file (default: src/gat/training_config.yaml) [train mode]'
-    )
-    parser.add_argument(
-        '--resume',
-        type=str,
-        default=None,
-        help='Path to checkpoint to resume from [train mode]'
     )
 
     # Inference arguments
@@ -136,6 +142,7 @@ def main():
             sample_buildings=args.sample_buildings,
             sample_districts=args.sample_districts,
             output_root_dir=args.output_root_dir,
+            model_identifier=args.model_identifier,
             config=args.config,
             resume=args.resume
         )
@@ -158,7 +165,8 @@ def main():
             output_root_dir=args.output_root_dir,
             district_ids=args.district_ids,
             device=args.device if args.device else ('cuda' if torch.cuda.is_available() else 'cpu'),
-            batch_inference=args.batch_inference
+            batch_inference=args.batch_inference,
+            resume=args.resume
         )
         inference_main(inference_args)
 

@@ -35,24 +35,28 @@ def save_checkpoint(
         filepath: Path to save checkpoint
         is_best: Whether this is the best model so far
     """
+    config_dict = config.to_dict() if hasattr(config, 'to_dict') else {}
+    
     checkpoint = {
         'epoch': epoch,
         'model_state_dict': model.state_dict(),
         'optimizer_state_dict': optimizer.state_dict(),
         'metrics': metrics,
-        'config': config.to_dict() if hasattr(config, 'to_dict') else {},
+        'config': config_dict,
+        'model_identifier': config_dict.get('model_identifier', 'default'),
     }
 
     if scheduler is not None:
         checkpoint['scheduler_state_dict'] = scheduler.state_dict()
 
     torch.save(checkpoint, filepath)
-    logger.info(f"Checkpoint saved to {filepath}")
+    logger.info("Checkpoint saved to %s (model_identifier: %s)", filepath, checkpoint['model_identifier'])
 
     if is_best:
-        best_path = filepath.parent / 'best_model.pth'
+        model_id = checkpoint.get('model_identifier', 'default')
+        best_path = filepath.parent / f'{model_id}_best_model.pth'
         torch.save(checkpoint, best_path)
-        logger.info(f"Best model saved to {best_path}")
+        logger.info("Best model saved to %s", best_path)
 
 
 def load_checkpoint(

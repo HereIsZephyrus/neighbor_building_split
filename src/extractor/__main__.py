@@ -18,6 +18,87 @@ except ImportError:
     MPI_AVAILABLE = False
     MPI = None
 
+# MPI message tags for dynamic task distribution
+TAG_REQUEST = 1  # Worker requests a task
+TAG_TASK = 2     # Master sends a task
+TAG_TERMINATE = 3  # Master tells worker to terminate
+
+def master_task_distributor(comm, size, districts, logger):
+    """Master process: distribute tasks dynamically to workers."""
+    num_districts = len(districts)
+    task_idx = 0
+    completed_count = 0
+
+    logger.info("Master: Starting dynamic task distribution for %d districts", num_districts)
+
+    # Initial task distribution: send one task to each worker
+    for worker_rank in range(1, size):
+        if task_idx < num_districts:
+            idx, district_row = list(districts.iterrows())[task_idx]
+            comm.send(task_idx, dest=worker_rank, tag=TAG_TASK)
+            logger.info("Master: Assigned task %d (district %s, area %.2f m²) to worker %d", 
+                       task_idx, idx, district_row.get('area', district_row.geometry.area), worker_rank)
+            task_idx += 1
+        else:
+            # No more tasks, send terminate signal
+            comm.send(-1, dest=worker_rank, tag=TAG_TERMINATE)
+
+    # Handle requests from workers
+    while completed_count < num_districts:
+        # Wait for any worker to request a new task
+        status = MPI.Status()
+        _ = comm.recv(source=MPI.ANY_SOURCE, tag=TAG_REQUEST, status=status)
+        worker_rank = status.Get_source()
+        completed_count += 1
+
+        # Log progress
+        if completed_count % 10 == 0 or completed_count == num_districts:
+            logger.info("Master: Progress %d/%d districts completed (%.1f%%)", 
+                       completed_count, num_districts, completed_count / num_districts * 100)
+
+        # Assign new task or send termination signal
+        if task_idx < num_districts:
+            idx, district_row = list(districts.iterrows())[task_idx]
+            comm.send(task_idx, dest=worker_rank, tag=TAG_TASK)
+            logger.info("Master: Assigned task %d (district %s, area %.2f m²) to worker %d", 
+                       task_idx, idx, district_row.get('area', district_row.geometry.area), worker_rank)
+            task_idx += 1
+        else:
+            # No more tasks, send terminate signal
+            comm.send(-1, dest=worker_rank, tag=TAG_TERMINATE)
+
+    logger.info("Master: All %d districts completed", num_districts)
+
+def worker_process_tasks(comm, rank, districts, config, reader, rasterizer, voronoi_generator, logger):
+    """Worker process: process tasks received from master."""
+    completed = 0
+    districts_list = list(districts.iterrows())
+
+    # Receive initial task from master
+    status = MPI.Status()
+    task_idx = comm.recv(source=0, tag=MPI.ANY_TAG, status=status)
+
+    while status.Get_tag() != TAG_TERMINATE and task_idx != -1:
+        # Process the task
+        idx, district_row = districts_list[task_idx]
+        try:
+            process_district(
+                config, reader, rasterizer, district_row, idx,
+                voronoi_generator=voronoi_generator
+            )
+            completed += 1
+        except Exception as exc:
+            logger.error("Worker %d: Error processing district %s: %s",
+                        rank, idx, exc, exc_info=True)
+
+        # Request a new task from master
+        comm.send(rank, dest=0, tag=TAG_REQUEST)
+
+        # Receive new task or termination signal
+        task_idx = comm.recv(source=0, tag=MPI.ANY_TAG, status=status)
+
+    logger.info("Worker %d: Received termination signal after completing %d tasks", rank, completed)
+
 def parse_arguments():
     """Parse command line arguments."""
     parser = argparse.ArgumentParser(
@@ -138,7 +219,7 @@ def main():
     log_file = config.output_dir / f"voronoi_diagram_{datetime.now().strftime('%Y%m%d_%H')}{log_suffix}.log" if generate_voronoi_diagram else config.output_dir / f"raster_generation_{datetime.now().strftime('%Y%m%d_%H')}{log_suffix}.log"
     mode_name = "Voronoi Diagram Generation" if generate_voronoi_diagram else "Raster Generation"
 
-    logger = setup_logger(log_file=log_file, level = logging.DEBUG)
+    logger = setup_logger(log_file=log_file, level = logging.INFO)
 
     if rank == 0:
         logger.info("=" * 80)
@@ -163,46 +244,34 @@ def main():
     districts = reader.load_districts()
     reader.load_buildings()
 
+    # Sort districts by area (ascending) to process small ones first
+    if 'geometry' in districts.columns:
+        districts['area'] = districts.geometry.area
+        districts = districts.sort_values('area', ascending=True).reset_index(drop=True)
+        if rank == 0:
+            logger.info("Sorted %d districts by area (min: %.2f m², max: %.2f m²)", 
+                       len(districts), districts['area'].min(), districts['area'].max())
+
     if rank == 0:
         logger.info("Processing %d districts...", len(districts))
 
     # Distribute work among MPI processes if enabled
     if use_mpi and size > 1:
-        # Divide districts among processes
-        # Each process gets approximately len(districts) / size districts
-        districts_list = list(districts.iterrows())
-        my_districts = districts_list[rank::size]  # Interleaved distribution
-
-        logger.info("Rank %d processing %d districts (indices: %s)", 
-                   rank, len(my_districts), 
-                   [idx for idx, _ in my_districts[:5]] + (['...'] if len(my_districts) > 5 else []))
-
-        # Process assigned districts (no tqdm in parallel mode)
-        completed = 0
-        for idx, district_row in my_districts:
-            try:
-                process_district(
-                    config, reader, rasterizer, district_row, idx,
-                    voronoi_generator=voronoi_generator
-                )
-                completed += 1
-                # Log progress periodically
-                if completed % 10 == 0 or completed == len(my_districts):
-                    logger.info("Rank %d: Completed %d/%d districts (%.1f%%)",
-                               rank, completed, len(my_districts),
-                               completed / len(my_districts) * 100)
-            except Exception as exc:
-                logger.error("Error processing district %s: %s",
-                            idx, exc, exc_info=True)
-                continue
-
-        logger.info("Rank %d finished processing all %d districts", rank, completed)
+        # Use dynamic task distribution (master-worker pattern)
+        if rank == 0:
+            # Master process: distribute tasks
+            master_task_distributor(comm, size, districts, logger)
+            logger.info("All MPI processes completed")
+        else:
+            # Worker process: receive and process tasks
+            worker_process_tasks(
+                comm, rank, districts, config, reader, rasterizer,
+                voronoi_generator, logger
+            )
 
         # Synchronize all processes before finishing
         if comm is not None:
             comm.Barrier()
-            if rank == 0:
-                logger.info("All MPI processes completed")
     else:
         # Sequential processing (no MPI or single process)
         for idx, district_row in tqdm(

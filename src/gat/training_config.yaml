@@ -1,0 +1,118 @@
+# GAT Training Configuration
+# 基于十几份样本创建的默认参数配置
+
+# =============================================================================
+# 模型架构参数
+# =============================================================================
+model:
+  # 隐藏层维度（每个attention head的维度）
+  # 降低维度减少模型容量，防止过拟合
+  hidden_dim: 64
+
+  # GAT层数
+  # 3层足够捕获局部邻域信息，同时避免过度平滑
+  num_layers: 3
+
+  # Attention头数
+  # 8个头可以学习不同的注意力模式
+  num_heads: 8
+
+  # Dropout率
+  # 0.6的dropout有助于防止过拟合（参考pytorch-GAT）
+  dropout: 0.6
+
+  # LeakyReLU负斜率（用于attention计算）
+  negative_slope: 0.2
+
+  # 是否添加自环
+  add_self_loops: true
+
+# =============================================================================
+# 训练参数
+# =============================================================================
+training:
+  # 学习率
+  # 降低学习率以提高训练稳定性（避免NaN）
+  # 原始值0.005可能过大，建议从0.001或0.0005开始
+  lr: 0.0005
+
+  # L2正则化系数
+  weight_decay: 0.0005
+
+  # 最大训练轮数
+  epochs: 200
+
+  # 早停耐心值（验证集性能不提升的最大epoch数）
+  patience: 100
+
+  # 早停最小改进阈值
+  min_delta: 0.0001
+
+  # 批大小（NeighborLoader的节点批大小）
+  # 1024节点对于8GB显存是合适的
+  batch_size: 1024
+
+  # 邻居采样数量（每层）
+  # [15, 10]表示第1层采样15个邻居，第2层采样10个邻居
+  num_neighbors: [15, 10]
+
+  # 图大小阈值（节点数超过此值时使用NeighborLoader采样）
+  node_threshold: 2000
+
+  # 训练集/验证集划分比例
+  train_ratio: 0.8
+
+  # DataLoader工作进程数（0表示单进程，适合调试）
+  num_workers: 0
+
+  # 是否使用自动混合精度（AMP）
+  # 可以减少显存占用，加速训练（可选，对8GB显存有帮助）
+  use_amp: false
+
+  # 梯度累积步数（用于模拟更大的批大小）
+  gradient_accumulation_steps: 1
+
+  # Spatial smoothness regularization
+  # Weight for smoothness loss (encourages neighboring buildings to have same class)
+  # 降低权重以提高稳定性，可以在训练稳定后逐渐增加
+  lambda_smooth: 0.08  # Recommended range: 0.05-2.0 (start small)
+
+  # Temperature for softmax in smoothness loss (lower = stricter constraint)
+  # 较高的温度(>1.0)可以提高数值稳定性
+  smooth_temperature: 1.0
+
+# =============================================================================
+# 数据参数
+# =============================================================================
+data:
+  # 建筑类别数量（固定为9类）
+  num_classes: 9
+
+  # 区域ID列表（空列表表示自动从data_dir检测）
+  district_ids: []
+
+  # 是否归一化特征
+  normalize_features: true
+
+# =============================================================================
+# 日志和检查点
+# =============================================================================
+logging:
+  # 日志输出间隔（每N个epoch输出一次）
+  log_interval: 10
+
+  # 检查点保存间隔（每N个epoch保存一次）
+  checkpoint_interval: 50
+
+  # 是否启用TensorBoard日志
+  enable_tensorboard: true
+
+# =============================================================================
+# 其他参数
+# =============================================================================
+# 随机种子（用于复现实验）
+seed: 42
+
+# 设备（'cuda'或'cpu'，程序会自动检测）
+# device: cuda  # 留空由程序自动检测
+

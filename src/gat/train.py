@@ -127,7 +127,7 @@ def main(args=None):
     try:
         shutil.copy(config_path, config_backup_path)
         print(f"Training config saved to: {config_backup_path}")
-        
+
         # Also save the full config as a dict for easier inspection
         config_dict_path = Path(config.output_root_dir) / f'config_dict_{config.model_identifier}.yaml'
         with open(config_dict_path, 'w', encoding='utf-8') as f:

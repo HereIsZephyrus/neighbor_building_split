@@ -5,6 +5,7 @@ Following pytorch-GAT training script structure.
 
 from typing import List, Optional, Dict
 from pathlib import Path
+from datetime import datetime
 import torch
 import torch.nn as nn
 from torch.optim import Adam
@@ -96,8 +97,14 @@ class Trainer:
         # TensorBoard writer
         self.writer = None
         if config.enable_tensorboard:
-            self.writer = SummaryWriter(log_dir=str(config.log_dir))
-            logger.info(f"TensorBoard logging to {config.log_dir}")
+            # Create subdirectory with model_identifier and timestamp
+            timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+            model_id = config.model_identifier if hasattr(config, 'model_identifier') else 'default'
+            tensorboard_subdir = Path(config.log_dir) / f"{model_id}_{timestamp}"
+            tensorboard_subdir.mkdir(parents=True, exist_ok=True)
+
+            self.writer = SummaryWriter(log_dir=str(tensorboard_subdir))
+            logger.info("TensorBoard logging to %s", tensorboard_subdir)
 
         # Training history
         self.history = {
@@ -136,6 +143,11 @@ class Trainer:
         # Train on each graph
         for data in self.train_data_list:
             data = data.to(self.device)
+
+            # Check for NaN/Inf in input features
+            if torch.isnan(data.x).any() or torch.isinf(data.x).any():
+                logger.warning("NaN/Inf detected in input features, skipping this graph")
+                continue
 
             # Check if we need neighbor sampling
             if should_use_neighbor_sampling(data, threshold=self.config.node_threshold):
@@ -180,8 +192,22 @@ class Trainer:
 
                     # Gradient accumulation
                     if (batch_count + 1) % self.config.gradient_accumulation_steps == 0:
-                        # Gradient clipping to prevent gradient explosion
-                        torch.nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=1.0)
+                        # Check for NaN/Inf in gradients
+                        has_nan_grad = False
+                        for name, param in self.model.named_parameters():
+                            if param.grad is not None:
+                                if torch.isnan(param.grad).any() or torch.isinf(param.grad).any():
+                                    logger.warning(f"NaN/Inf detected in gradients for {name}")
+                                    has_nan_grad = True
+                                    break
+
+                        if has_nan_grad:
+                            # Skip this update
+                            self.optimizer.zero_grad()
+                            continue
+
+                        # Gradient clipping to prevent gradient explosion (increased from 1.0 to 0.5 for stronger clipping)
+                        torch.nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=0.5)
                         self.optimizer.step()
                         self.optimizer.zero_grad()
 
@@ -203,9 +229,20 @@ class Trainer:
 
                 # Final optimizer step if needed
                 if batch_count % self.config.gradient_accumulation_steps != 0:
-                    # Gradient clipping to prevent gradient explosion
-                    torch.nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=1.0)
-                    self.optimizer.step()
+                    # Check for NaN/Inf in gradients
+                    has_nan_grad = False
+                    for name, param in self.model.named_parameters():
+                        if param.grad is not None:
+                            if torch.isnan(param.grad).any() or torch.isinf(param.grad).any():
+                                logger.warning(f"NaN/Inf detected in gradients for {name}")
+                                has_nan_grad = True
+                                break
+
+                    if not has_nan_grad:
+                        # Gradient clipping to prevent gradient explosion
+                        torch.nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=0.5)
+                        self.optimizer.step()
+
                     self.optimizer.zero_grad()
 
             else:
@@ -232,9 +269,24 @@ class Trainer:
 
                 # Backward pass
                 loss.backward()
-                # Gradient clipping to prevent gradient explosion
-                torch.nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=1.0)
-                self.optimizer.step()
+
+                # Check for NaN/Inf in gradients
+                has_nan_grad = False
+                for name, param in self.model.named_parameters():
+                    if param.grad is not None:
+                        if torch.isnan(param.grad).any() or torch.isinf(param.grad).any():
+                            logger.warning(f"NaN/Inf detected in gradients for {name}, skipping update")
+                            has_nan_grad = True
+                            break
+
+                if not has_nan_grad:
+                    # Gradient clipping to prevent gradient explosion (increased strength from 1.0 to 0.5)
+                    torch.nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=0.5)
+                    self.optimizer.step()
+                else:
+                    # If gradients are invalid, skip this update
+                    self.optimizer.zero_grad()
+                    continue
 
                 # Metrics
                 with torch.no_grad():

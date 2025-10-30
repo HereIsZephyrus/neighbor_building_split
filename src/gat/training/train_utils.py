@@ -36,7 +36,7 @@ def save_checkpoint(
         is_best: Whether this is the best model so far
     """
     config_dict = config.to_dict() if hasattr(config, 'to_dict') else {}
-    
+
     checkpoint = {
         'epoch': epoch,
         'model_state_dict': model.state_dict(),

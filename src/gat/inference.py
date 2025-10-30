@@ -116,7 +116,7 @@ def load_model_from_file(checkpoint_path: Path, device: str) -> tuple:
 
     # Create model
     model = GAT(
-        in_features=model_config.get('in_features', 13),
+        in_features=model_config.get('in_features', 14),
         hidden_dim=model_config.get('hidden_dim', 64),
         num_classes=model_config.get('num_classes', 3),
         num_layers=model_config.get('num_layers', 3),

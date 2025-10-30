@@ -17,6 +17,7 @@ def extract_building_features(
 ) -> np.ndarray:
     """
     Extract 13 geometric and shape features from building geometries.
+    Note: Node degree is added as the 14th feature during graph construction.
 
     Features extracted:
     1. area: Building footprint area
@@ -32,12 +33,15 @@ def extract_building_features(
     11. perimeter_area_ratio: perimeter / sqrt(area)
     12. centroid_distance: Distance from district center (normalized)
     13. floor: Mean floor of the building
+    14. degree: Number of neighboring buildings (added during graph construction)
+    
     Args:
         buildings_gdf: GeoDataFrame with building geometries
         normalize_spatial: If True, normalize centroid coordinates within district bounds
 
     Returns:
         numpy array of shape (N, 13) with extracted features
+        (degree feature is added later in BuildingGraphDataset)
     """
     n_buildings = len(buildings_gdf)
     features = np.zeros((n_buildings, 13))
@@ -175,6 +179,8 @@ def get_feature_names() -> list:
         'convexity',
         'num_vertices',
         'perimeter_area_ratio',
-        'centroid_distance'
+        'centroid_distance',
+        'floor',
+        'degree'
     ]
 

@@ -3,14 +3,14 @@ model:
   hidden_dim: 64
   num_layers: 3
   num_heads: 8
-  dropout: 0.5
+  dropout: 0.6
   negative_slope: 0.2
   add_self_loops: true
 
 training:
   lr: 0.0005
   # L2 regularization coefficient
-  weight_decay: 0.0005
+  weight_decay: 0.001
   # maximum number of training epochs
   epochs: 200
 

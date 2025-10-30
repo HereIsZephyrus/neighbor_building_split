@@ -31,7 +31,7 @@ class GAT(nn.Module):
 
     def __init__(
         self,
-        in_features: int = 13,
+        in_features: int = 14,
         hidden_dim: int = 64,
         num_classes: int = 8,
         num_layers: int = 3,

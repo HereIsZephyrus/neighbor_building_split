@@ -223,7 +223,7 @@ def embedding_tsne(
     labels: np.ndarray,
     save_path: Optional[str] = None,
     perplexity: int = 30,
-    figsize: Tuple[int, int] = (13, 10)
+    figsize: Tuple[int, int] = (14, 10)
 ) -> None:
     """
     Visualize embeddings using t-SNE.

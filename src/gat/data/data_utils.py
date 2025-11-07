@@ -10,7 +10,7 @@ from sklearn.preprocessing import StandardScaler
 from sklearn.model_selection import KFold
 from torch_geometric.data import Data
 
-from ..utils.feature_extractor import extract_building_features
+from ..utils.feature_extractor import extract_gat_features
 from ..utils.graph_utils import similarity_matrix_to_edge_index
 from ..utils.logger import get_logger
 
@@ -77,9 +77,12 @@ def load_district_graph(
 
     logger.debug(f"Filtered buildings: {len(buildings_gdf)} buildings")
 
-    # Extract features
-    features = extract_building_features(buildings_gdf, normalize_spatial=True)
+    # Extract GAT features
+    features = extract_gat_features(buildings_gdf)
 
+    # Calculate degree feature (will be added as 5th feature)
+    # For now we just get the base 4 features, degree will be added later
+    
     # Normalize features
     if normalize_features:
         if scaler is None:

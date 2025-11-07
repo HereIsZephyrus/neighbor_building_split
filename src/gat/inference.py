@@ -20,6 +20,7 @@ from .models.gat import GAT
 from .data.data_utils import load_district_graph
 from .utils.logger import setup_logger, get_logger
 from .utils.spectral_clustering import perform_spectral_clustering_pipeline
+from .utils.feature_extractor import extract_clustering_features
 
 logger = get_logger()
 
@@ -166,7 +167,7 @@ def generate_embeddings_for_district(
     """
 
     try:
-        # Load district data (normalized features)
+        # Load district data with GAT features (normalized)
         data, scaler = load_district_graph(
             district_id=district_id,
             adjacency_dir=adjacency_dir,
@@ -175,19 +176,43 @@ def generate_embeddings_for_district(
             scaler=scaler
         )
 
-        # Also load unnormalized data to get original features
-        data_unnorm, _ = load_district_graph(
-            district_id=district_id,
-            adjacency_dir=adjacency_dir,
-            building_path=building_path,
-            normalize_features=False,
-            scaler=None
-        )
-        original_features = data_unnorm.x.numpy()
-
-        # Load adjacency matrix
+        # Load buildings for clustering features
+        buildings_gdf = gpd.read_file(building_path)
+        
+        # Load adjacency matrix to get building IDs
         adjacency_path = adjacency_dir / f"district_{district_id}_adjacency.pkl"
         adjacency_matrix = pd.read_pickle(adjacency_path)
+        building_ids_in_matrix = adjacency_matrix.index.tolist()
+        
+        # Filter and sort buildings to match adjacency matrix
+        id_field = None
+        for possible_id in ['FID', 'OBJECTID', 'ID', 'id', 'building_id']:
+            if possible_id in buildings_gdf.columns:
+                id_field = possible_id
+                break
+        
+        if id_field is None:
+            buildings_gdf['building_id'] = buildings_gdf.index
+            id_field = 'building_id'
+        
+        buildings_gdf = buildings_gdf[buildings_gdf[id_field].isin(building_ids_in_matrix)].copy()
+        buildings_gdf['_sort_key'] = buildings_gdf[id_field].map({bid: i for i, bid in enumerate(building_ids_in_matrix)})
+        buildings_gdf = buildings_gdf.sort_values('_sort_key').reset_index(drop=True)
+        
+        # Extract clustering features (12 base features)
+        clustering_features = extract_clustering_features(buildings_gdf)
+        
+        # Load voronoi data for cluster merging
+        voronoi_path = adjacency_dir / f"district_{district_id}_voronoi.shp"
+        voronoi_gdf = None
+        if voronoi_path.exists():
+            try:
+                voronoi_gdf = gpd.read_file(voronoi_path)
+                logger.debug(f"Loaded voronoi data for district {district_id}: {len(voronoi_gdf)} polygons")
+            except Exception as e:
+                logger.warning(f"Failed to load voronoi data for district {district_id}: {e}")
+        else:
+            logger.warning(f"Voronoi file not found: {voronoi_path}")
 
         # Move to device
         data = data.to(device)
@@ -229,9 +254,11 @@ def generate_embeddings_for_district(
             try:
                 spectral_clusters, _, cluster_to_label, _ = perform_spectral_clustering_pipeline(
                     embeddings=embeddings_np,
-                    features=original_features,
+                    features=clustering_features,
                     adjacency_matrix=adjacency_matrix,
                     gat_labels=gat_labels_np,
+                    building_ids=building_ids_in_matrix,
+                    voronoi_gdf=voronoi_gdf,
                     n_clusters=n_clusters,
                     embedding_weight=0.5,
                     feature_weight=0.3,

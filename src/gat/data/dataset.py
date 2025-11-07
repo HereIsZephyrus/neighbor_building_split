@@ -10,6 +10,7 @@ from sklearn.preprocessing import StandardScaler
 
 from .data_utils import load_district_graph
 from ..utils.logger import get_logger
+from ..utils.feature_extractor import extract_gat_features
 from .building import BuildingDataset
 from .district import DistrictDataset
 
@@ -64,7 +65,7 @@ class BuildingGraphDataset(Dataset):
 
         # First pass: collect all features (including degree) for standardization
         all_features = []
-        district_data = []  # Store (district_id, adjacency_df, building_df, feature_cols, degrees) tuples
+        district_data = []  # Store (district_id, adjacency_df, building_df) tuples
 
         for district_id in self.district_dataset.get_district_ids():
             try:
@@ -83,15 +84,12 @@ class BuildingGraphDataset(Dataset):
                     logger.warning(f"No buildings found for district {district_id}")
                     continue
 
-                # Extract features (all columns except 'id' and 'label')
-                feature_cols = [col for col in buildings_df.columns 
-                               if col not in ['FID', 'OBJECTID', 'id', 'label', 'geometry']]
-
-                if not feature_cols:
-                    logger.error(f"No feature columns found for district {district_id}")
+                # Extract GAT features (height, albedo, hwratio, density)
+                try:
+                    features = extract_gat_features(buildings_df)
+                except ValueError as e:
+                    logger.error(f"Failed to extract GAT features for district {district_id}: {e}")
                     continue
-
-                features = buildings_df[feature_cols].values
 
                 # Calculate degrees for this district
                 # Build ID to index mapping
@@ -123,7 +121,7 @@ class BuildingGraphDataset(Dataset):
                 # Concatenate original features with degree
                 features_with_degree = np.hstack([features, degrees])
                 all_features.append(features_with_degree)
-                district_data.append((district_id, adjacency_df, buildings_df, feature_cols))
+                district_data.append((district_id, adjacency_df, buildings_df))
 
             except Exception as e:
                 logger.error(f"Failed to load data for district {district_id}: {e}")
@@ -137,12 +135,12 @@ class BuildingGraphDataset(Dataset):
         self.scaler = StandardScaler()
         self.scaler.fit(all_features_concat)
         self._num_features = all_features_concat.shape[1]
-        logger.info(f"Fitted StandardScaler on {all_features_concat.shape[0]} buildings, {self._num_features} features (including degree)")
+        logger.info(f"Fitted StandardScaler on {all_features_concat.shape[0]} buildings, {self._num_features} GAT features (4 base + 1 degree)")
 
         # Second pass: construct graphs with normalized features
-        for district_id, adjacency_df, buildings_df, feature_cols in district_data:
+        for district_id, adjacency_df, buildings_df, _ in district_data:
             try:
-                graph = self._construct_graph(district_id, adjacency_df, buildings_df, feature_cols)
+                graph = self._construct_graph(district_id, adjacency_df, buildings_df)
                 self.graphs.append(graph)
                 logger.info(f"Constructed graph for district {district_id}: "
                            f"{graph.num_nodes} nodes, {graph.edge_index.shape[1]} edges")
@@ -156,8 +154,7 @@ class BuildingGraphDataset(Dataset):
         self, 
         district_id: int, 
         adjacency_df: pd.DataFrame,
-        buildings_df: pd.DataFrame,
-        feature_cols: List[str]
+        buildings_df: pd.DataFrame
     ) -> Data:
         """
         Construct a PyG Data object for one district.
@@ -166,13 +163,12 @@ class BuildingGraphDataset(Dataset):
             district_id: District ID
             adjacency_df: DataFrame containing adjacency information
             buildings_df: DataFrame containing building information
-            feature_cols: List of feature column names
 
         Returns:
             PyG Data object
         """
-        # Extract features (will add degree feature later)
-        features = buildings_df[feature_cols].values
+        # Extract GAT features (will add degree feature later)
+        features = extract_gat_features(buildings_df)
         num_nodes = len(buildings_df)
 
         # Extract labels (convert from 1-based to 0-based indexing)

@@ -5,8 +5,9 @@ import geopandas as gpd
 import numpy as np
 import torch
 from pathlib import Path
-from typing import Tuple, Optional, List
+from typing import Tuple, Optional, List, Iterator
 from sklearn.preprocessing import StandardScaler
+from sklearn.model_selection import KFold
 from torch_geometric.data import Data
 
 from ..utils.feature_extractor import extract_building_features
@@ -57,7 +58,7 @@ def load_district_graph(
     # Create mapping from building ID to row index
     # Assumes buildings_gdf has an ID field (FID, OBJECTID, etc.)
     id_field = None
-    for possible_id in ['FID', 'OBJECTID', 'ID', 'id', 'fid', 'building_id']:
+    for possible_id in ['FID', 'OBJECTID', 'ID', 'id', 'FID', 'building_id']:
         if possible_id in buildings_gdf.columns:
             id_field = possible_id
             break
@@ -165,6 +166,34 @@ def split_dataset(
     logger.info(f"Split dataset: {len(train_data)} train, {len(val_data)} val")
 
     return train_data, val_data
+
+
+def kfold_split(
+    data_list: List[Data],
+    n_splits: int = 5,
+    random_seed: int = 42
+) -> Iterator[Tuple[List[Data], List[Data]]]:
+    """
+    Create K-fold cross-validation splits.
+
+    Args:
+        data_list: List of PyG Data objects
+        n_splits: Number of folds
+        random_seed: Random seed for reproducibility
+
+    Yields:
+        train_data: List of training Data objects for this fold
+        val_data: List of validation Data objects for this fold
+    """
+    kfold = KFold(n_splits=n_splits, shuffle=True, random_state=random_seed)
+
+    for fold_idx, (train_indices, val_indices) in enumerate(kfold.split(data_list)):
+        train_data = [data_list[i] for i in train_indices]
+        val_data = [data_list[i] for i in val_indices]
+
+        logger.info(f"Fold {fold_idx + 1}/{n_splits}: {len(train_data)} train, {len(val_data)} val")
+
+        yield train_data, val_data
 
 
 def compute_feature_stats(data_list: List[Data]) -> Tuple[np.ndarray, np.ndarray]:

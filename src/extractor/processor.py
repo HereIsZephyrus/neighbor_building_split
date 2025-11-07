@@ -4,7 +4,7 @@ logger = get_logger()
 
 def process_district(config, reader, rasterizer, district_row, idx, voronoi_generator=None):
     """Process a district."""
-    district_id = district_row.get("FID", idx)
+    district_id = district_row.get("fid", idx)
     district_geom = district_row.geometry
 
     # Check if output files already exist and skip if so

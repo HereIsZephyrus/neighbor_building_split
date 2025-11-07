@@ -11,11 +11,18 @@ from datetime import datetime
 import shutil
 import yaml
 
-from .training import GATConfig, Trainer
-from .models.gat import GAT
-from .data import BuildingGraphDataset, BuildingDataset, DistrictDataset, split_dataset
+from .training import GATConfig
+from .data import BuildingGraphDataset, BuildingDataset, DistrictDataset
 from .utils import setup_logger
+from .train_cv import train_cross_validation_mpi, train_cross_validation_sequential
+from .train_final import train_final_model
 
+try:
+    from mpi4py import MPI
+    MPI_AVAILABLE = True
+except ImportError:
+    MPI_AVAILABLE = False
+    MPI = None
 
 def parse_args():
     """Parse command line arguments for training."""
@@ -66,8 +73,16 @@ def parse_args():
         help='Path to checkpoint to resume from'
     )
 
-    return parser.parse_args()
+    # Training mode
+    parser.add_argument(
+        '--mode',
+        type=str,
+        default='cv',
+        choices=['cv', 'final'],
+        help='Training mode: "cv" for cross-validation (hyperparameter tuning), "final" for full training on all data'
+    )
 
+    return parser.parse_args()
 
 def main(args=None):
     """Main training function.
@@ -122,22 +137,46 @@ def main(args=None):
     print(f"  - Logs: {config.log_dir}")
     print(f"  - Embeddings: {config.output_dir}")
 
-    # Save training config to output directory for reference
-    config_backup_path = Path(config.output_root_dir) / f'training_config_{config.model_identifier}.yaml'
-    try:
-        shutil.copy(config_path, config_backup_path)
-        print(f"Training config saved to: {config_backup_path}")
-        
-        # Also save the full config as a dict for easier inspection
-        config_dict_path = Path(config.output_root_dir) / f'config_dict_{config.model_identifier}.yaml'
-        with open(config_dict_path, 'w', encoding='utf-8') as f:
-            yaml.dump(config.to_dict(), f, default_flow_style=False, allow_unicode=True)
-        print(f"Config dict saved to: {config_dict_path}")
-    except Exception as exc:
-        print(f"Warning: Failed to save config backup: {exc}")
+    # Save training config to output directory for reference (MPI-safe: only rank 0)
+    # Get rank before saving to avoid multiple processes writing simultaneously
+    current_rank = 0
+    if MPI_AVAILABLE:
+        try:
+            comm_temp = MPI.COMM_WORLD
+            current_rank = comm_temp.Get_rank()
+        except:
+            pass
 
-    # Setup logger
-    log_file = Path(config.log_dir) / f"{config.model_identifier}_training_{datetime.now().strftime('%Y%m%d_%H%M%S')}.log"
+    if current_rank == 0:
+        config_backup_path = Path(config.output_root_dir) / f'training_config_{config.model_identifier}.yaml'
+        try:
+            shutil.copy(config_path, config_backup_path)
+            print(f"Training config saved to: {config_backup_path}")
+
+            # Also save the full config as a dict for easier inspection
+            config_dict_path = Path(config.output_root_dir) / f'config_dict_{config.model_identifier}.yaml'
+            with open(config_dict_path, 'w', encoding='utf-8') as f:
+                yaml.dump(config.to_dict(), f, default_flow_style=False, allow_unicode=True)
+            print(f"Config dict saved to: {config_dict_path}")
+        except Exception as exc:
+            print(f"Warning: Failed to save config backup: {exc}")
+
+    # Setup logger (MPI-safe: each rank gets its own log file)
+    if MPI_AVAILABLE:
+        try:
+            comm = MPI.COMM_WORLD
+            rank = comm.Get_rank()
+        except:
+            rank = 0
+    else:
+        rank = 0
+
+    timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+    if rank == 0:
+        log_file = Path(config.log_dir) / f"{config.model_identifier}_training_{timestamp}.log"
+    else:
+        log_file = Path(config.log_dir) / f"{config.model_identifier}_training_{timestamp}_rank{rank}.log"
+
     logger = setup_logger(name='gat', log_file=log_file)
 
     logger.info("=" * 80)
@@ -167,53 +206,22 @@ def main(args=None):
         logger.error("Failed to load dataset: %s", exc, exc_info=True)
         sys.exit(1)
 
-    # Split into train/val
-    logger.info("Splitting dataset: %.0f%% train, %.0f%% val", config.train_ratio * 100, (1-config.train_ratio) * 100)
-    data_list = [dataset.get(i) for i in range(len(dataset))]
-    train_data, val_data = split_dataset(data_list, train_ratio=config.train_ratio, random_seed=config.seed)
+    # Dispatch to appropriate training mode
+    logger.info("Training mode: %s", args.mode)
 
-    logger.info("Train: %d districts, Val: %d districts", len(train_data), len(val_data))
-
-    # Initialize model
-    logger.info("Initializing model...")
-    model = GAT(
-        in_features=dataset.num_features,
-        hidden_dim=config.hidden_dim,
-        num_classes=config.num_classes,
-        num_layers=config.num_layers,
-        num_heads=config.num_heads,
-        dropout=config.dropout,
-        negative_slope=config.negative_slope,
-        add_self_loops=config.add_self_loops
-    )
-
-    logger.info("Model:\n%s", model)
-
-    # Initialize trainer
-    logger.info("Initializing trainer...")
-    trainer = Trainer(
-        model=model,
-        config=config,
-        train_data_list=train_data,
-        val_data_list=val_data
-    )
-
-    if args.resume:
-        logger.info("Resuming from checkpoint: %s", args.resume)
-        trainer.resume_from_checkpoint(Path(args.resume))
-
-    # Train
-    try:
-        history = trainer.train()
-
-        logger.info("Training completed successfully!")
-        logger.info("Best validation accuracy: %.4f", max(history.get('val_acc', [0])))
-
-    except KeyboardInterrupt:
-        logger.info("Training interrupted by user")
-        sys.exit(0)
-    except Exception as exc:
-        logger.error("Training failed: %s", exc, exc_info=True)
+    if args.mode == 'cv':
+        # Cross-validation mode for hyperparameter tuning
+        if MPI_AVAILABLE:
+            logger.info("Using MPI-parallel cross-validation")
+            train_cross_validation_mpi(config, dataset, args)
+        else:
+            logger.info("MPI not available, using sequential cross-validation")
+            train_cross_validation_sequential(config, dataset, args)
+    elif args.mode == 'final':
+        # Final training mode on all data
+        train_final_model(config, dataset, args)
+    else:
+        logger.error("Invalid training mode: %s", args.mode)
         sys.exit(1)
 
 

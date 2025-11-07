@@ -30,6 +30,7 @@ class GATConfig:
     epochs: int = 200  # Maximum number of epochs
     patience: int = 100  # Early stopping patience
     min_delta: float = 1e-4  # Minimum improvement for early stopping
+    val_interval: int = 10  # Validate every N epochs
     lambda_smooth: float = 0.5  # Spatial smoothness loss weight
     smooth_temperature: float = 1.0  # Temperature for smoothness loss softmax
 
@@ -37,8 +38,8 @@ class GATConfig:
     batch_size: int = 1024  # Nodes per batch for NeighborLoader
     num_neighbors: List[int] = field(default_factory=lambda: [15, 10])  # Neighbor sampling
     node_threshold: int = 2000  # Use sampling for graphs > this size
-    train_ratio: float = 0.8  # Train/val split ratio
     num_workers: int = 0  # DataLoader workers (0 for debugging, 4+ for speed)
+    k_fold: int = 8  # Number of folds for cross-validation
 
     # resource paths
     adjacency_dir: str = ""
@@ -81,9 +82,9 @@ class GATConfig:
         assert self.num_heads > 0, "num_heads must be positive"
         assert 0 <= self.dropout < 1, "dropout must be in [0, 1)"
         assert self.lr > 0, "lr must be positive"
-        assert 0 < self.train_ratio < 1, "train_ratio must be in (0, 1)"
         assert self.epochs > 0, "epochs must be positive"
         assert self.batch_size > 0, "batch_size must be positive"
+        assert self.k_fold >= 2, "k_fold must be at least 2"
 
     def to_dict(self) -> dict:
         """Convert config to dictionary."""
@@ -106,7 +107,6 @@ class GATConfig:
                 'patience': self.patience,
                 'batch_size': self.batch_size,
                 'num_neighbors': self.num_neighbors,
-                'train_ratio': self.train_ratio,
                 'lambda_smooth': self.lambda_smooth,
                 'smooth_temperature': self.smooth_temperature,
             },
@@ -162,10 +162,11 @@ class GATConfig:
             'epochs': training_params.get('epochs', 200),
             'patience': training_params.get('patience', 100),
             'min_delta': training_params.get('min_delta', 1e-4),
+            'val_interval': training_params.get('val_interval', 10),
             'batch_size': training_params.get('batch_size', 1024),
             'num_neighbors': training_params.get('num_neighbors', [15, 10]),
             'node_threshold': training_params.get('node_threshold', 2000),
-            'train_ratio': training_params.get('train_ratio', 0.8),
+            'k_fold': training_params.get('k_fold', 5),
             'num_workers': training_params.get('num_workers', 0),
             'use_amp': training_params.get('use_amp', False),
             'gradient_accumulation_steps': training_params.get('gradient_accumulation_steps', 1),

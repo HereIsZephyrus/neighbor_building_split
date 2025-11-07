@@ -167,6 +167,13 @@ def parse_arguments():
         help="Enable MPI parallel processing (requires mpirun/mpiexec and mpi4py)"
     )
 
+    # Large district chunking options
+    chunk_group = parser.add_argument_group('Large District Chunking Options')
+    chunk_group.add_argument(
+        "--enable-large-district-mode",
+        action="store_true",
+        help="Enable chunked processing for large districts that exceed size threshold"
+    )
     return parser.parse_args()
 
 def main():
@@ -202,7 +209,8 @@ def main():
             visualize_voronoi=args.visualize,
             viz_interval=args.viz_interval,
             debug_voronoi=args.debug_voronoi,
-            debug_adjacency=args.debug_adjacency
+            debug_adjacency=args.debug_adjacency,
+            enable_large_district_mode=args.enable_large_district_mode
         )
     except ValueError as e:
         if rank == 0:

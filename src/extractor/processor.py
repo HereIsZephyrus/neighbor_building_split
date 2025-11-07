@@ -1,4 +1,6 @@
 from .utils import get_logger, create_adjacency_matrix
+from .chunker import estimate_raster_shape, calculate_required_chunks
+from .chunk_processor import process_district_chunked
 
 logger = get_logger()
 
@@ -20,6 +22,33 @@ def process_district(config, reader, rasterizer, district_row, idx, voronoi_gene
         raster_path = config.image_dir / f"district_{district_id}_raster.tif"
         if raster_path.exists():
             logger.info("District %s already processed (raster exists), skipping", district_id)
+            return
+
+    # Check if large district mode is enabled and if district requires chunking
+    if config.enable_large_district_mode and config.generate_voronoi_diagram:
+        # Estimate raster dimensions
+        estimated_shape = estimate_raster_shape(
+            district_geom,
+            resolution=rasterizer.resolution,
+            buffer=10.0
+        )
+
+        # Check if chunking is needed
+        needs_chunking = calculate_required_chunks(estimated_shape, config.max_chunk_size)
+
+        if needs_chunking:
+            logger.info("District %s estimated size: %dx%d pixels (exceeds %d threshold)",
+                       district_id, estimated_shape[0], estimated_shape[1], config.max_chunk_size)
+            logger.info("Using CHUNKED processing mode")
+
+            # Delegate to chunked processing
+            success = process_district_chunked(
+                config, reader, rasterizer, district_row, idx, voronoi_generator
+            )
+
+            if not success:
+                logger.error("Chunked processing failed for district %s", district_id)
+
             return
 
     logger.info("\nProcessing district %s (area: %.2f m²)", district_id, 

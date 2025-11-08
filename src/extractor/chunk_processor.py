@@ -104,7 +104,8 @@ def process_district_chunked(
     Returns:
         True if processing succeeded, False otherwise
     """
-    district_id = district_row.get("fid", idx)
+    # Try both uppercase and lowercase FID field names
+    district_id = district_row.get("FID", district_row.get("fid", idx))
     district_geom = district_row.geometry
 
     logger.info("\n%s", "="*80)

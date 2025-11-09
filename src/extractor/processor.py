@@ -6,7 +6,7 @@ logger = get_logger()
 
 def process_district(config, reader, rasterizer, district_row, idx, voronoi_generator=None):
     """Process a district."""
-    # Try both uppercase and lowercase FID field names
+    # Extract district ID from FID field (fallback to index if not present)
     district_id = district_row.get("FID", district_row.get("fid", idx))
     district_geom = district_row.geometry
 

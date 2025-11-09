@@ -253,9 +253,10 @@ def main():
     reader.load_buildings()
 
     # Sort districts by area (ascending) to process small ones first
+    # Keep original index to preserve FID correspondence
     if 'geometry' in districts.columns:
         districts['area'] = districts.geometry.area
-        districts = districts.sort_values('area', ascending=True).reset_index(drop=True)
+        districts = districts.sort_values('area', ascending=True)
         if rank == 0:
             logger.info("Sorted %d districts by area (min: %.2f m², max: %.2f m²)", 
                        len(districts), districts['area'].min(), districts['area'].max())

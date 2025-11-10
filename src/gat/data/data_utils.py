@@ -82,7 +82,7 @@ def load_district_graph(
 
     # Calculate degree feature (will be added as 5th feature)
     # For now we just get the base 4 features, degree will be added later
-    
+
     # Normalize features
     if normalize_features:
         if scaler is None:

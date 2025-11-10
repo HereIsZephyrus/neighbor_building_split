@@ -9,13 +9,14 @@ import sys
 from pathlib import Path
 from typing import List, Optional
 import pickle
+import yaml
 
 import torch
 import numpy as np
 import pandas as pd
 import geopandas as gpd
 from tqdm import tqdm
-
+from .training import GATConfig
 from .models.gat import GAT
 from .data.data_utils import load_district_graph
 from .utils.logger import setup_logger, get_logger
@@ -178,30 +179,30 @@ def generate_embeddings_for_district(
 
         # Load buildings for clustering features
         buildings_gdf = gpd.read_file(building_path)
-        
+
         # Load adjacency matrix to get building IDs
         adjacency_path = adjacency_dir / f"district_{district_id}_adjacency.pkl"
         adjacency_matrix = pd.read_pickle(adjacency_path)
         building_ids_in_matrix = adjacency_matrix.index.tolist()
-        
+
         # Filter and sort buildings to match adjacency matrix
         id_field = None
         for possible_id in ['FID', 'OBJECTID', 'ID', 'id', 'building_id']:
             if possible_id in buildings_gdf.columns:
                 id_field = possible_id
                 break
-        
+
         if id_field is None:
             buildings_gdf['building_id'] = buildings_gdf.index
             id_field = 'building_id'
-        
+
         buildings_gdf = buildings_gdf[buildings_gdf[id_field].isin(building_ids_in_matrix)].copy()
         buildings_gdf['_sort_key'] = buildings_gdf[id_field].map({bid: i for i, bid in enumerate(building_ids_in_matrix)})
         buildings_gdf = buildings_gdf.sort_values('_sort_key').reset_index(drop=True)
-        
+
         # Extract clustering features (12 base features)
         clustering_features = extract_clustering_features(buildings_gdf)
-        
+
         # Load voronoi data for cluster merging
         voronoi_path = adjacency_dir / f"district_{district_id}_voronoi.shp"
         voronoi_gdf = None
@@ -252,18 +253,50 @@ def generate_embeddings_for_district(
 
         if perform_clustering:
             try:
+                # Load spectral clustering configuration from training config if available
+                # These parameters control the two-stage classification + spatial smoothing approach
+
+
+                # Try to load configuration
+                config_path = Path(__file__).parent / 'training_config.yaml'
+                if config_path.exists():
+                    with open(config_path, 'r', encoding='utf-8') as f:
+                        full_config = yaml.safe_load(f)
+                    spectral_config = full_config.get('spectral_clustering', {})
+                    embedding_weight = spectral_config.get('embedding_weight', 0.3)
+                    feature_weight = spectral_config.get('feature_weight', 0.5)
+                    distance_weight = spectral_config.get('distance_weight', 0.2)
+                    distance_scale = spectral_config.get('distance_scale', 100.0)
+                    use_confidence_weighted = spectral_config.get('use_confidence_weighted_voting', True)
+                    area_threshold = spectral_config.get('area_threshold_m2', 1_000_000)
+                    logger.info("Loaded spectral clustering config: emb=%.2f, feat=%.2f, dist=%.2f, conf_weighted=%s",
+                               embedding_weight, feature_weight, distance_weight, use_confidence_weighted)
+                else:
+                    # Use default values (optimized weights)
+                    embedding_weight = 0.3
+                    feature_weight = 0.5
+                    distance_weight = 0.2
+                    distance_scale = 100.0
+                    use_confidence_weighted = True
+                    area_threshold = 1_000_000
+                    logger.warning("Config file not found, using default spectral clustering parameters")
+
+                # Perform spectral clustering with confidence-weighted voting
                 spectral_clusters, _, cluster_to_label, _ = perform_spectral_clustering_pipeline(
                     embeddings=embeddings_np,
                     features=clustering_features,
                     adjacency_matrix=adjacency_matrix,
                     gat_labels=gat_labels_np,
+                    gat_logits=logits_np,  # Pass logits for confidence-weighted voting
                     building_ids=building_ids_in_matrix,
                     voronoi_gdf=voronoi_gdf,
                     n_clusters=n_clusters,
-                    embedding_weight=0.5,
-                    feature_weight=0.3,
-                    distance_weight=0.2,
-                    distance_scale=100.0,  # Adjust based on distance units
+                    use_confidence_weighted_voting=use_confidence_weighted,
+                    embedding_weight=embedding_weight,
+                    feature_weight=feature_weight,
+                    distance_weight=distance_weight,
+                    distance_scale=distance_scale,
+                    area_threshold_m2=area_threshold,
                     random_state=42
                 )
 

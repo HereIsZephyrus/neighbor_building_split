@@ -1,48 +1,46 @@
 # GAT Training Configuration
 model:
-  hidden_dim: 64
-  num_layers: 3
-  num_heads: 6
-  dropout: 0.6
-  negative_slope: 0.2
-  add_self_loops: true
+  hidden_dim:
+  num_layers:
+  num_heads:
+  dropout:
+  negative_slope:
+  add_self_loops:
 
 training:
-  lr: 0.0005
+  lr:
   # L2 regularization coefficient
-  weight_decay: 0.002
+  weight_decay:
   # maximum number of training epochs
-  epochs: 1000
+  epochs:
 
   # early stopping patience
-  patience: 200
-  min_delta: 0.001
-  k_fold: 8
+  patience:
+  min_delta:
+  k_fold:
 
   # validation interval (validate every N epochs)
-  val_interval: 10
-
-  batch_size: 1024
+  val_interval:
+  
 
   # number of neighbors to sample (per layer)
-  # [15, 10]表示第1层采样15个邻居，第2层采样10个邻居
-  num_neighbors: [15, 10]
+  batch_size:
+  # number of neighbors to sample (per layer) e.g. [15, 10] means 15 neighbors in the first layer and 10 neighbors in the second layer
+  num_neighbors:
   # graph size threshold (use NeighborLoader sampling when node count exceeds this value)
-  node_threshold: 2000
-  num_workers: 0
-  use_amp: false
-  gradient_accumulation_steps: 1
+  node_threshold:
+  num_workers:
+  use_amp:
+  gradient_accumulation_steps:
 
   # Spatial smoothness regularization
   # Weight for smoothness loss (encourages neighboring buildings to have same class)
-  lambda_smooth: 1.0  # Recommended range: 0.05-2.0 (start small)
-
+  lambda_smooth:  # Recommended range: 0.05-2.0 (start small)
   # Temperature for softmax in smoothness loss (lower = stricter constraint)
-  smooth_temperature: 0.8
+  smooth_temperature:
 
 data:
-  num_classes: 9
-  district_ids: []
+  num_classes: 5
   normalize_features: true
 
 logging:
@@ -50,4 +48,26 @@ logging:
   checkpoint_interval: 50
   enable_tensorboard: true
 
-seed: 42
+# Spectral Clustering Configuration
+# Used in inference stage for spatial smoothing of GAT predictions
+spectral_clustering:
+  # Affinity matrix weights (should sum to 1.0)
+  # Lower embedding_weight: GAT already performed classification, avoid over-reliance on discriminative features
+  # Higher feature_weight: Focus on morphological similarity for spatial grouping
+  embedding_weight:    # Weight for GAT embedding similarity (discriminative information)
+  feature_weight:      # Weight for morphological feature similarity (spatial grouping)
+  distance_weight:     # Weight for spatial distance affinity (spatial constraint)
+
+  # Distance scaling parameter
+  distance_scale:    # Scale factor for distance-to-affinity conversion (in meters)
+
+  # Clustering parameters
+  oversample_factor:   # Multiply estimated clusters by this factor (over-segment then merge)
+  area_threshold_m2:   # Minimum cluster area threshold in square meters (1 km²)
+
+  # Majority voting strategy
+  use_confidence_weighted_voting:  # Use GAT confidence scores for weighted voting
+  confidence_threshold_high:        # High confidence threshold (trust GAT more)
+  confidence_threshold_low:         # Low confidence threshold (rely more on spatial grouping)
+
+seed:

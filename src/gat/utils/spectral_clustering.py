@@ -1,7 +1,21 @@
 """Spectral clustering utilities for building clustering.
 
-Combines GAT embeddings, building features, and adjacency matrix
-to perform spectral clustering and assign GAT labels to clusters.
+This module implements a two-stage classification + spatial smoothing approach:
+
+1. Stage 1 (GAT): Classification using discriminative features
+   - Predicts building labels based on learned representations
+   - Provides initial classification and confidence scores
+
+2. Stage 2 (Spectral Clustering): Spatial smoothing using morphological features
+   - Groups buildings based on morphological similarity and spatial proximity
+   - Uses majority voting (optionally confidence-weighted) to assign labels to clusters
+   - Ensures spatial consistency: nearby similar buildings get the same label
+
+Design Rationale:
+- GAT focuses on "what type?" (discriminative task)
+- Spectral clustering focuses on "which belong together?" (grouping task)
+- Two feature sets for two objectives: better task-specific performance
+- Confidence weighting: trust high-confidence GAT predictions more
 """
 
 import numpy as np
@@ -16,81 +30,142 @@ from .logger import get_logger
 logger = get_logger()
 
 
+def compute_confidence(logits: np.ndarray) -> np.ndarray:
+    """
+    Compute prediction confidence from GAT logits.
+
+    Confidence is defined as the maximum softmax probability across all classes.
+    Higher confidence indicates that GAT is more certain about its prediction.
+
+    Args:
+        logits: GAT classification logits, shape (N, num_classes)
+
+    Returns:
+        confidence: Confidence scores for each prediction, shape (N,)
+                   Values range from 0 to 1, where 1 means completely certain
+
+    Example:
+        logits = [[2.0, 1.0, 0.5]]  # GAT strongly prefers class 0
+        confidence = compute_confidence(logits)  # Returns ~0.66 (high confidence)
+    """
+    from scipy.special import softmax
+
+    # Convert logits to probabilities
+    probs = softmax(logits, axis=1)
+
+    # Confidence is the maximum probability
+    confidence = np.max(probs, axis=1)
+
+    return confidence
+
+
 def compute_affinity_matrix(
     embeddings: np.ndarray,
     features: np.ndarray,
     adjacency_matrix: pd.DataFrame,
-    embedding_weight: float = 0.5,
-    feature_weight: float = 0.3,
+    embedding_weight: float = 0.3,
+    feature_weight: float = 0.5,
     distance_weight: float = 0.2,
     distance_scale: float = 1.0
 ) -> np.ndarray:
     """
-    Compute affinity matrix by combining GAT embeddings, building features, and adjacency.
+    Compute affinity matrix for spectral clustering by combining multiple similarity measures.
+
+    This function implements the core of the spatial smoothing strategy:
+    - Embedding similarity: Captures GAT's learned discriminative features
+    - Feature similarity: Captures morphological similarity for grouping
+    - Distance affinity: Enforces spatial proximity constraint
+
+    Weight Rationale (default: 0.3/0.5/0.2):
+    - Lower embedding_weight (0.3): GAT already performed classification, avoid over-reliance
+    - Higher feature_weight (0.5): Focus on morphological similarity for spatial grouping
+    - Distance_weight (0.2): Spatial constraint to prevent distant buildings from clustering
 
     Args:
-        embeddings: GAT node embeddings (N, D_emb)
-        features: Original building features (N, D_feat)
-        adjacency_matrix: Distance-based adjacency matrix (N, N)
-        embedding_weight: Weight for embedding similarity
-        feature_weight: Weight for feature similarity
-        distance_weight: Weight for distance-based adjacency
-        distance_scale: Scale factor for distance conversion
+        embeddings: GAT node embeddings (N, D_emb) - discriminative features learned by GAT
+        features: Morphological building features (N, D_feat) - shape, size, orientation, etc.
+        adjacency_matrix: Distance-based adjacency matrix (N, N) - spatial relationships
+        embedding_weight: Weight for embedding similarity (default 0.3)
+        feature_weight: Weight for feature similarity (default 0.5)
+        distance_weight: Weight for distance-based adjacency (default 0.2)
+        distance_scale: Scale factor for distance-to-affinity conversion in meters (default 1.0)
 
     Returns:
-        affinity_matrix: Combined affinity matrix (N, N)
+        affinity_matrix: Combined affinity matrix (N, N), normalized to [0, 1]
+
+    Note:
+        Weights should sum to 1.0 for proper normalization.
+        Adjust weights based on validation performance.
     """
     logger.debug(
-        "Computing affinity matrix: embeddings=%s, features=%s, adjacency=%s",
-        embeddings.shape, features.shape, adjacency_matrix.shape
+        "Computing affinity matrix: embeddings=%s, features=%s, adjacency=%s, weights=[%.2f,%.2f,%.2f]",
+        embeddings.shape, features.shape, adjacency_matrix.shape,
+        embedding_weight, feature_weight, distance_weight
     )
 
-    # 1. Embedding-based similarity (cosine similarity)
+    # 1. Embedding-based similarity (captures discriminative information from GAT)
+    # Using cosine similarity: measures angle between embedding vectors
     embedding_sim = cosine_similarity(embeddings)
-    # Normalize to [0, 1]
+    # Normalize from [-1, 1] to [0, 1] range
     embedding_sim = (embedding_sim + 1) / 2
-    logger.debug("Embedding similarity: min=%.4f, max=%.4f", embedding_sim.min(), embedding_sim.max())
+    logger.debug("Embedding similarity computed: min=%.4f, max=%.4f, mean=%.4f", 
+                 embedding_sim.min(), embedding_sim.max(), embedding_sim.mean())
 
-    # 2. Feature-based similarity (cosine similarity)
+    # 2. Feature-based similarity (captures morphological similarity for grouping)
+    # Using cosine similarity on morphological features (area, shape, orientation, etc.)
     feature_sim = cosine_similarity(features)
-    # Normalize to [0, 1]
+    # Normalize from [-1, 1] to [0, 1] range
     feature_sim = (feature_sim + 1) / 2
-    logger.debug("Feature similarity: min=%.4f, max=%.4f", feature_sim.min(), feature_sim.max())
+    logger.debug("Feature similarity computed: min=%.4f, max=%.4f, mean=%.4f", 
+                 feature_sim.min(), feature_sim.max(), feature_sim.mean())
 
-    # 3. Distance-based affinity from adjacency matrix
-    # Adjacency matrix contains distances (smaller = closer)
-    # Convert to similarity: similarity = exp(-distance / scale)
+    # 3. Distance-based affinity (enforces spatial proximity constraint)
+    # Adjacency matrix contains distances between buildings (meters)
+    # Convert distance to affinity using exponential decay: affinity = exp(-distance / scale)
+    # Closer buildings have higher affinity, distant buildings have lower affinity
     distance_matrix = adjacency_matrix.values
 
-    # Handle cases where distance is 0 or very small
+    # Apply exponential decay to convert distances to affinities
+    # distance_scale controls how quickly affinity decays with distance
     distance_affinity = np.exp(-distance_matrix / distance_scale)
 
-    # Set diagonal to 1 (self-similarity)
+    # Set diagonal to 1 (self-similarity is maximum)
     np.fill_diagonal(distance_affinity, 1.0)
 
-    # Zero out non-adjacent nodes (where original adjacency was 0)
+    # Zero out non-adjacent nodes (where original adjacency was 0 = no connection)
     distance_affinity[distance_matrix == 0] = 0
 
-    logger.debug("Distance affinity: min=%.4f, max=%.4f", 
-                 distance_affinity[distance_affinity > 0].min(), distance_affinity.max())
+    logger.debug("Distance affinity computed: min=%.4f, max=%.4f, mean=%.4f (non-zero)", 
+                 distance_affinity[distance_affinity > 0].min(), 
+                 distance_affinity.max(),
+                 distance_affinity[distance_affinity > 0].mean())
 
-    # 4. Combine all three similarity measures
+    # 4. Combine all three similarity measures using weighted sum
+    # This is the core of the two-stage approach:
+    # - Embeddings provide discriminative information (what GAT learned)
+    # - Features provide morphological similarity (for spatial grouping)
+    # - Distance provides spatial constraint (only nearby buildings cluster together)
     affinity = (
         embedding_weight * embedding_sim +
         feature_weight * feature_sim +
         distance_weight * distance_affinity
     )
 
-    # Normalize combined affinity to [0, 1]
+    logger.debug("Combined affinity contributions: emb=%.4f, feat=%.4f, dist=%.4f",
+                 (embedding_weight * embedding_sim).mean(),
+                 (feature_weight * feature_sim).mean(),
+                 (distance_weight * distance_affinity[distance_affinity > 0]).mean())
+
+    # Normalize combined affinity to [0, 1] range for stability
     affinity_min = affinity.min()
     affinity_max = affinity.max()
     if affinity_max > affinity_min:
         affinity = (affinity - affinity_min) / (affinity_max - affinity_min)
 
-    # Ensure symmetry
+    # Ensure symmetry (required for spectral clustering)
     affinity = (affinity + affinity.T) / 2
 
-    # Set diagonal to 1
+    # Set diagonal to 1 (maximum self-affinity)
     np.fill_diagonal(affinity, 1.0)
 
     logger.debug("Final affinity matrix: min=%.4f, max=%.4f, mean=%.4f", 
@@ -136,9 +211,12 @@ def spectral_cluster(
 def assign_labels_to_clusters(
     cluster_assignments: np.ndarray,
     gat_labels: np.ndarray
-) -> Tuple[np.ndarray, dict]:
+) -> Tuple[dict, np.ndarray]:
     """
-    Assign GAT predicted labels to spectral clusters based on majority voting.
+    Assign GAT predicted labels to spectral clusters using simple majority voting.
+
+    This is the basic voting strategy: each building gets one vote, and the most
+    common label in each cluster wins.
 
     Args:
         cluster_assignments: Spectral cluster assignments (N,)
@@ -148,7 +226,7 @@ def assign_labels_to_clusters(
         cluster_to_label: Mapping from cluster ID to GAT label (dict)
         final_labels: Final label for each node based on cluster assignment (N,)
     """
-    logger.debug("Assigning GAT labels to spectral clusters via majority voting")
+    logger.debug("Assigning GAT labels to spectral clusters via simple majority voting")
 
     unique_clusters = np.unique(cluster_assignments)
     cluster_to_label = {}
@@ -172,7 +250,87 @@ def assign_labels_to_clusters(
     # Create final labels array
     final_labels = np.array([cluster_to_label[int(c)] for c in cluster_assignments])
 
-    logger.info("Assigned GAT labels to %d clusters", len(cluster_to_label))
+    logger.info("Assigned GAT labels to %d clusters using simple majority voting", len(cluster_to_label))
+
+    return cluster_to_label, final_labels
+
+
+def assign_labels_with_confidence(
+    cluster_assignments: np.ndarray,
+    gat_labels: np.ndarray,
+    gat_logits: np.ndarray
+) -> Tuple[dict, np.ndarray]:
+    """
+    Assign GAT labels to clusters using confidence-weighted majority voting.
+
+    Unlike simple majority voting where each building gets one vote, this method
+    weights each vote by GAT's prediction confidence. Buildings where GAT is very
+    confident have more influence on the cluster's final label.
+
+    Benefits:
+    - Prevents low-confidence wrong predictions from being "voted up"
+    - Trusts high-confidence GAT predictions more
+    - More robust at cluster boundaries where GAT may be uncertain
+
+    Example:
+        Cluster with 3 buildings:
+        - Building A: Label 0, confidence 0.9 → weighted vote = 0.9 for Label 0
+        - Building B: Label 1, confidence 0.4 → weighted vote = 0.4 for Label 1  
+        - Building C: Label 1, confidence 0.3 → weighted vote = 0.3 for Label 1
+        Result: Label 0 wins (0.9 > 0.7), even though Label 1 has more votes
+
+    Args:
+        cluster_assignments: Spectral cluster assignments (N,)
+        gat_labels: GAT predicted labels (N,)
+        gat_logits: GAT classification logits (N, num_classes)
+
+    Returns:
+        cluster_to_label: Mapping from cluster ID to GAT label (dict)
+        final_labels: Final label for each node based on cluster assignment (N,)
+    """
+    logger.debug("Assigning GAT labels to spectral clusters via confidence-weighted majority voting")
+
+    # Compute confidence scores from logits
+    confidence = compute_confidence(gat_logits)
+
+    logger.debug("Confidence statistics: min=%.4f, max=%.4f, mean=%.4f, median=%.4f",
+                 confidence.min(), confidence.max(), confidence.mean(), np.median(confidence))
+
+    unique_clusters = np.unique(cluster_assignments)
+    cluster_to_label = {}
+
+    for cluster_id in unique_clusters:
+        # Find all nodes in this cluster
+        mask = cluster_assignments == cluster_id
+        cluster_labels = gat_labels[mask]
+        cluster_confidence = confidence[mask]
+
+        # Confidence-weighted voting: sum confidence scores for each label
+        label_weights = {}
+        for label, conf in zip(cluster_labels, cluster_confidence):
+            label = int(label)
+            label_weights[label] = label_weights.get(label, 0.0) + conf
+
+        # Select label with highest weighted sum
+        majority_label = max(label_weights, key=label_weights.get)
+        cluster_to_label[int(cluster_id)] = majority_label
+
+        # Count simple votes for comparison
+        unique_labels, counts = np.unique(cluster_labels, return_counts=True)
+        vote_counts = dict(zip(unique_labels.tolist(), counts.tolist()))
+
+        logger.debug(
+            "Cluster %d: %d nodes, simple votes=%s, weighted votes=%s, assigned label=%d",
+            cluster_id, mask.sum(), vote_counts, 
+            {k: f"{v:.2f}" for k, v in label_weights.items()}, 
+            majority_label
+        )
+
+    # Create final labels array
+    final_labels = np.array([cluster_to_label[int(c)] for c in cluster_assignments])
+
+    logger.info("Assigned GAT labels to %d clusters using confidence-weighted voting", 
+                len(cluster_to_label))
 
     return cluster_to_label, final_labels
 
@@ -367,40 +525,54 @@ def perform_spectral_clustering_pipeline(
     building_ids: Optional[List] = None,
     voronoi_gdf: Optional[gpd.GeoDataFrame] = None,
     n_clusters: Optional[int] = None,
-    embedding_weight: float = 0.5,
-    feature_weight: float = 0.3,
+    gat_logits: Optional[np.ndarray] = None,
+    use_confidence_weighted_voting: bool = True,
+    embedding_weight: float = 0.3,
+    feature_weight: float = 0.5,
     distance_weight: float = 0.2,
     distance_scale: float = 1.0,
     area_threshold_m2: float = 1_000_000,
     random_state: int = 42
 ) -> Tuple[np.ndarray, np.ndarray, dict, np.ndarray]:
     """
-    Complete spectral clustering pipeline with oversampling and area-based merging.
+    Complete spectral clustering pipeline for spatial smoothing of GAT predictions.
+
+    This pipeline implements the second stage of our two-stage approach:
+    1. Compute affinity matrix combining embeddings, morphological features, and spatial distance
+    2. Perform spectral clustering to group spatially similar buildings
+    3. Assign GAT labels to clusters using (optionally confidence-weighted) majority voting
+    4. Merge small clusters based on area threshold
+
+    The key innovation is the confidence-weighted voting: GAT predictions with high
+    confidence have more influence, preventing uncertain predictions from dominating.
 
     Args:
-        embeddings: GAT embeddings (N, D_emb)
-        features: Clustering features (N, D_feat)
-        adjacency_matrix: Distance-based adjacency (N, N)
-        gat_labels: GAT predicted labels (N,)
-        building_ids: List of building IDs (for voronoi matching)
+        embeddings: GAT embeddings (N, D_emb) - discriminative features from GAT
+        features: Morphological clustering features (N, D_feat) - shape, size, orientation
+        adjacency_matrix: Distance-based adjacency (N, N) - spatial relationships
+        gat_labels: GAT predicted labels (N,) - initial classification from GAT
+        building_ids: List of building IDs (for voronoi matching in merging)
         voronoi_gdf: GeoDataFrame with voronoi polygons (for area-based merging)
-        n_clusters: Number of clusters (auto-estimate with 1.5x oversampling if None)
-        embedding_weight: Weight for embedding similarity
-        feature_weight: Weight for feature similarity
-        distance_weight: Weight for distance-based adjacency
-        distance_scale: Scale factor for distance conversion
-        area_threshold_m2: Minimum cluster area threshold (default: 1 km²)
-        random_state: Random seed
+        n_clusters: Number of clusters (auto-estimate with oversampling if None)
+        gat_logits: GAT classification logits (N, num_classes) - for confidence weighting
+        use_confidence_weighted_voting: Whether to use confidence-weighted voting (default True)
+        embedding_weight: Weight for embedding similarity (default 0.3)
+        feature_weight: Weight for morphological feature similarity (default 0.5)
+        distance_weight: Weight for distance-based adjacency (default 0.2)
+        distance_scale: Scale factor for distance-to-affinity conversion in meters (default 1.0)
+        area_threshold_m2: Minimum cluster area threshold in square meters (default 1 km²)
+        random_state: Random seed for reproducibility
 
     Returns:
         cluster_assignments: Final cluster assignments after merging (N,)
         final_labels: Final labels after assigning GAT labels (N,)
-        cluster_to_label: Mapping from cluster to GAT label
+        cluster_to_label: Mapping from cluster ID to GAT label (dict)
         affinity_matrix: Computed affinity matrix (N, N)
     """
-    logger.info("Starting spectral clustering pipeline")
+    logger.info("Starting spectral clustering pipeline (weights: emb=%.2f, feat=%.2f, dist=%.2f, conf_weighted=%s)",
+                embedding_weight, feature_weight, distance_weight, use_confidence_weighted_voting)
 
-    # Step 1: Compute affinity matrix
+    # Step 1: Compute affinity matrix combining embeddings, features, and spatial distance
     affinity_matrix = compute_affinity_matrix(
         embeddings=embeddings,
         features=features,
@@ -411,25 +583,41 @@ def perform_spectral_clustering_pipeline(
         distance_scale=distance_scale
     )
 
-    # Step 2: Estimate optimal clusters if not provided (with 1.5x oversampling)
+    # Step 2: Estimate optimal number of clusters if not provided (with 1.5x oversampling)
+    # Oversampling helps capture fine-grained spatial structure, small clusters merged later
     if n_clusters is None:
         n_clusters = estimate_optimal_clusters(affinity_matrix, oversample_factor=1.5)
 
-    # Step 3: Perform spectral clustering
+    # Step 3: Perform spectral clustering to group spatially similar buildings
     cluster_assignments = spectral_cluster(
         affinity_matrix=affinity_matrix,
         n_clusters=n_clusters,
         random_state=random_state
     )
 
-    # Step 4: Assign GAT labels to clusters
-    cluster_to_label, final_labels = assign_labels_to_clusters(
-        cluster_assignments=cluster_assignments,
-        gat_labels=gat_labels
-    )
+    # Step 4: Assign GAT labels to clusters using majority voting
+    # Choose voting strategy based on availability of logits and configuration
+    if use_confidence_weighted_voting and gat_logits is not None:
+        logger.info("Using confidence-weighted majority voting")
+        cluster_to_label, final_labels = assign_labels_with_confidence(
+            cluster_assignments=cluster_assignments,
+            gat_labels=gat_labels,
+            gat_logits=gat_logits
+        )
+    else:
+        if use_confidence_weighted_voting and gat_logits is None:
+            logger.warning("Confidence-weighted voting requested but logits not provided, "
+                          "falling back to simple majority voting")
+        logger.info("Using simple majority voting")
+        cluster_to_label, final_labels = assign_labels_to_clusters(
+            cluster_assignments=cluster_assignments,
+            gat_labels=gat_labels
+        )
 
     # Step 5: Merge small clusters based on voronoi area threshold
+    # This ensures spatially significant clusters while maintaining spatial consistency
     if building_ids is not None and voronoi_gdf is not None:
+        logger.info("Merging small clusters (threshold: %.2f km²)", area_threshold_m2 / 1_000_000)
         cluster_assignments, cluster_to_label = merge_small_clusters(
             cluster_assignments=cluster_assignments,
             building_ids=building_ids,
@@ -445,7 +633,8 @@ def perform_spectral_clustering_pipeline(
     else:
         logger.info("Skipping cluster merging (no building IDs or voronoi data provided)")
 
-    logger.info("Spectral clustering pipeline completed successfully")
+    logger.info("Spectral clustering pipeline completed successfully: %d final clusters",
+                len(np.unique(cluster_assignments)))
 
     return cluster_assignments, final_labels, cluster_to_label, affinity_matrix
 

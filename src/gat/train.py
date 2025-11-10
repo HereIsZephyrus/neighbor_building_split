@@ -7,6 +7,7 @@ Usage:
 import argparse
 import sys
 from pathlib import Path
+from datetime import datetime
 import shutil
 import yaml
 
@@ -146,11 +147,20 @@ def main(args=None):
     print(f"  - Config dicts: {config.config_dict_dir}")
     # Save training config to output directory for reference (MPI-safe: only rank 0)
     # Get rank before saving to avoid multiple processes writing simultaneously
+    # Check if we should use MPI (available and more than 1 process)
+    use_mpi = False
     current_rank = 0
+    world_size = 1
+    
     if MPI_AVAILABLE:
         try:
             comm_temp = MPI.COMM_WORLD
             current_rank = comm_temp.Get_rank()
+            world_size = comm_temp.Get_size()
+            # Only use MPI if we have more than 1 process
+            use_mpi = (world_size > 1)
+            if not use_mpi and current_rank == 0:
+                print(f"MPI available but only 1 process detected, running in sequential mode")
         except:
             pass
 
@@ -169,12 +179,8 @@ def main(args=None):
             print(f"Warning: Failed to save config backup: {exc}")
 
     # Setup logger (MPI-safe: each rank gets its own log file)
-    if MPI_AVAILABLE:
-        try:
-            comm = MPI.COMM_WORLD
-            rank = comm.Get_rank()
-        except:
-            rank = 0
+    if use_mpi:
+        rank = current_rank
     else:
         rank = 0
 
@@ -217,11 +223,14 @@ def main(args=None):
 
     if args.mode == 'cv':
         # Cross-validation mode for hyperparameter tuning
-        if MPI_AVAILABLE:
-            logger.info("Using MPI-parallel cross-validation")
+        if use_mpi:
+            logger.info(f"Using MPI-parallel cross-validation with {world_size} processes")
             train_cross_validation_mpi(config, dataset, args)
         else:
-            logger.info("MPI not available, using sequential cross-validation")
+            if MPI_AVAILABLE and world_size == 1:
+                logger.info("Only 1 MPI process detected, using sequential cross-validation")
+            else:
+                logger.info("MPI not available, using sequential cross-validation")
             train_cross_validation_sequential(config, dataset, args)
     elif args.mode == 'final':
         # Final training mode on all data

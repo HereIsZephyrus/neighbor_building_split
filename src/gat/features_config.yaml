@@ -23,7 +23,7 @@ clustering_features:
   - radius       # Distance from center (meters)
   - factality    # Fractal dimension
   - overlap      # Overlap metric
-  - shape        # Shape metric
+  - rangeIndex        # Shape metric
   - density      # Building density
   # Note: 'degree' (number of neighbors) can be added during clustering if needed
 

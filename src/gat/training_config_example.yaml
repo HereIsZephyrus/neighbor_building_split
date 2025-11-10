@@ -39,7 +39,7 @@ training:
   smooth_temperature:
 
 data:
-  num_classes: 5
+  num_classes: 9
   normalize_features: true
 
 logging:

@@ -138,7 +138,7 @@ class BuildingGraphDataset(Dataset):
         logger.info(f"Fitted StandardScaler on {all_features_concat.shape[0]} buildings, {self._num_features} GAT features (4 base + 1 degree)")
 
         # Second pass: construct graphs with normalized features
-        for district_id, adjacency_df, buildings_df, _ in district_data:
+        for district_id, adjacency_df, buildings_df in district_data:
             try:
                 graph = self._construct_graph(district_id, adjacency_df, buildings_df)
                 self.graphs.append(graph)

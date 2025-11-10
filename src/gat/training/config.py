@@ -18,7 +18,7 @@ class GATConfig:
     """
 
     hidden_dim: int = 64  # Hidden dimension per head
-    num_classes: int = 5  # Number of building categories (4 classes)
+    num_classes: int = 9  # Number of building categories (9 classes)
     num_layers: int = 3  # Number of GAT layers
     num_heads: int = 8  # Number of attention heads
     dropout: float = 0.6  # Dropout rate (as in pytorch-GAT)

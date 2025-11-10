@@ -21,7 +21,6 @@ training:
 
   # validation interval (validate every N epochs)
   val_interval:
-  
 
   # number of neighbors to sample (per layer)
   batch_size:

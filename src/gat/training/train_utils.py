@@ -1,13 +1,11 @@
 """Training utilities and helper functions."""
 
-import torch
-import torch.nn as nn
 from pathlib import Path
 from typing import Dict, Optional, Any
 import json
-
-from ..utils.metrics import compute_metrics
-from ..utils.logger import get_logger
+import torch
+import torch.nn as nn
+from ..utils import get_logger, compute_metrics
 
 logger = get_logger()
 
@@ -127,26 +125,6 @@ def compute_loss_and_metrics(
     metrics['loss'] = loss.item()
 
     return metrics
-
-
-def log_metrics_to_tensorboard(
-    writer,
-    metrics: Dict[str, float],
-    epoch: int,
-    prefix: str = 'train'
-) -> None:
-    """
-    Log metrics to TensorBoard.
-
-    Args:
-        writer: TensorBoard SummaryWriter
-        metrics: Dictionary of metrics to log
-        epoch: Current epoch
-        prefix: Prefix for metric names (e.g., 'train', 'val')
-    """
-    for key, value in metrics.items():
-        writer.add_scalar(f'{prefix}/{key}', value, epoch)
-
 
 def log_model_info(model: nn.Module) -> None:
     """

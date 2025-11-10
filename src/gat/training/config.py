@@ -63,6 +63,10 @@ class GATConfig:
     checkpoint_interval: int = 50  # Save checkpoint every N epochs
     enable_tensorboard: bool = True  # Enable TensorBoard logging
 
+    # Visualization
+    enable_visualization: bool = True  # Enable district visualization
+    max_visualize_districts: int = 5  # Maximum districts to visualize
+
     # Random seed
     seed: int = 42
 
@@ -212,7 +216,7 @@ class GATConfig:
             'spectral_confidence_threshold_high': spectral_params.get('confidence_threshold_high'),
             'spectral_confidence_threshold_low': spectral_params.get('confidence_threshold_low'),
         })
-        
+
         # Filter out None values - let dataclass use its defaults
         params = {k: v for k, v in params.items() if v is not None}
 

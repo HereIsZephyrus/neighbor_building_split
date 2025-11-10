@@ -4,7 +4,7 @@ from .dataset import BuildingGraphDataset
 from .building import BuildingDataset
 from .district import DistrictDataset
 from .data_utils import load_district_graph, split_dataset, kfold_split, compute_feature_stats
-from .graph_batch_sampler import create_neighbor_loader
+from .graph_batch_sampler import create_neighbor_loader, should_use_neighbor_sampling
 
 __all__ = [
     'BuildingGraphDataset',
@@ -13,7 +13,7 @@ __all__ = [
     'kfold_split',
     'compute_feature_stats',
     'create_neighbor_loader',
+    'should_use_neighbor_sampling',
     'BuildingDataset',
     'DistrictDataset',
 ]
-

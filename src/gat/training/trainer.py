@@ -14,14 +14,14 @@ from torch_geometric.data import Data
 
 from torch.utils.tensorboard import SummaryWriter
 
-from ..models.gat import GAT
-from ..data.graph_batch_sampler import create_neighbor_loader, should_use_neighbor_sampling
+from ..models import GAT
+from ..data import create_neighbor_loader, should_use_neighbor_sampling
+from ..utils import get_logger
 from .config import GATConfig
 from .smooth_loss import edge_smoothness_loss
 from .train_utils import (
     save_checkpoint,
     load_checkpoint,
-    log_metrics_to_tensorboard,
     log_model_info,
     set_random_seed,
     format_metrics,
@@ -29,7 +29,10 @@ from .train_utils import (
     EarlyStopping,
     save_training_history
 )
-from ..utils.logger import get_logger
+from .tensorborad_utils import (
+    log_metrics_to_tensorboard,
+    log_district_visualizations_to_tensorboard
+)
 
 logger = get_logger()
 
@@ -492,6 +495,42 @@ class Trainer:
         # Save training history
         history_path = Path(self.config.checkpoint_dir) / f'{self.config.model_identifier}_training_history.json'
         save_training_history(self.history, history_path)
+
+        # Generate visualizations for final model
+        if self.writer is not None and self.config.enable_visualization:
+            logger.info("Generating final model visualizations...")
+
+            # Visualize training data
+            if self.train_data_list:
+                try:
+                    log_district_visualizations_to_tensorboard(
+                        writer=self.writer,
+                        model=self.model,
+                        data_list=self.train_data_list[:self.config.max_visualize_districts],
+                        building_path=Path(self.config.building_path),
+                        epoch=epoch,
+                        tag='train_final',
+                        max_districts=self.config.max_visualize_districts,
+                        device=str(self.device)
+                    )
+                except Exception as e:
+                    logger.error(f"Failed to generate training visualizations: {e}", exc_info=True)
+
+            # Visualize validation data
+            if self.val_data_list:
+                try:
+                    log_district_visualizations_to_tensorboard(
+                        writer=self.writer,
+                        model=self.model,
+                        data_list=self.val_data_list[:self.config.max_visualize_districts],
+                        building_path=Path(self.config.building_path),
+                        epoch=epoch,
+                        tag='val_final',
+                        max_districts=self.config.max_visualize_districts,
+                        device=str(self.device)
+                    )
+                except Exception as e:
+                    logger.error(f"Failed to generate validation visualizations: {e}", exc_info=True)
 
         # Close TensorBoard writer
         if self.writer is not None:

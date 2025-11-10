@@ -6,6 +6,7 @@ import yaml
 from torch.utils.tensorboard import SummaryWriter
 from .models import GAT
 from .training import Trainer
+from .training.tensorborad_utils import log_district_visualizations_to_tensorboard
 from .utils import get_logger
 from .data import kfold_split
 
@@ -50,14 +51,23 @@ def train_cross_validation_mpi(config, dataset, args):
     # Prepare data
     data_list = [dataset.get(i) for i in range(len(dataset))]
 
-    # Create shared TensorBoard writer (only on rank 0)
+    # Create shared TensorBoard writer (all ranks write to same directory)
     shared_writer = None
-    if rank == 0 and config.enable_tensorboard:
-        timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
-        tensorboard_dir = Path(config.log_dir) / f"{config.model_identifier}_cv_{timestamp}"
-        tensorboard_dir.mkdir(parents=True, exist_ok=True)
-        shared_writer = SummaryWriter(log_dir=str(tensorboard_dir))
-        logger.info("TensorBoard logging to %s", tensorboard_dir)
+    tensorboard_dir = None
+    if config.enable_tensorboard:
+        # Rank 0 creates the directory and broadcasts the path
+        if rank == 0:
+            timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+            tensorboard_dir = Path(config.log_dir) / f"{config.model_identifier}_cv_{timestamp}"
+            tensorboard_dir.mkdir(parents=True, exist_ok=True)
+            tensorboard_dir = str(tensorboard_dir)
+        
+        # Broadcast tensorboard directory to all ranks
+        tensorboard_dir = comm.bcast(tensorboard_dir, root=0)
+        
+        # All ranks create their own writer to the same directory
+        shared_writer = SummaryWriter(log_dir=tensorboard_dir)
+        logger.info("Rank %d: TensorBoard logging to %s", rank, tensorboard_dir)
 
     # Each rank processes specific folds
     fold_results = []
@@ -88,8 +98,8 @@ def train_cross_validation_mpi(config, dataset, args):
         # Create fold-specific config
         fold_config = copy.deepcopy(config)
         fold_config.model_identifier = f"{config.model_identifier}_fold{fold_idx}"
-        fold_config.checkpoint_dir = f"{config.output_root_dir}/checkpoints/fold{fold_idx}"
-        fold_config.output_dir = f"{config.output_root_dir}/output_{config.model_identifier}_fold{fold_idx}"
+        fold_config.checkpoint_dir = f"{config.checkpoint_dir}/fold{fold_idx}"
+        fold_config.output_dir = f"{config.output_dir}/fold{fold_idx}"
         fold_config.enable_tensorboard = False  # Use shared writer
 
         # Create directories (MPI-safe: use try-except to handle race condition)
@@ -124,6 +134,50 @@ def train_cross_validation_mpi(config, dataset, args):
                 'best_val_acc': best_val_acc,
                 'history': history
             })
+
+            # Generate visualizations for this fold (each rank visualizes its own fold)
+            if shared_writer is not None:
+                logger.info("Rank %d: Generating visualizations for fold %d...", rank, fold_idx)
+
+                # Visualize training data
+                if train_data:
+                    try:
+                        max_visualize = getattr(fold_config, 'max_visualize_districts', 5)
+                        log_district_visualizations_to_tensorboard(
+                            writer=shared_writer,
+                            model=model,
+                            data_list=train_data[:max_visualize],
+                            building_path=Path(fold_config.building_path),
+                            epoch=fold_idx,
+                            tag=f'fold{fold_idx}_train',
+                            max_districts=max_visualize,
+                            device=fold_config.device,
+                            district_path=Path(fold_config.district_path) if hasattr(fold_config, 'district_path') else None
+                        )
+                        logger.info("Rank %d: Completed training visualizations for fold %d", rank, fold_idx)
+                    except Exception as e:
+                        logger.error("Rank %d: Failed to generate training visualizations for fold %d: %s", 
+                                   rank, fold_idx, e, exc_info=True)
+
+                # Visualize validation data
+                if val_data:
+                    try:
+                        max_visualize = getattr(fold_config, 'max_visualize_districts', 5)
+                        log_district_visualizations_to_tensorboard(
+                            writer=shared_writer,
+                            model=model,
+                            data_list=val_data[:max_visualize],
+                            building_path=Path(fold_config.building_path),
+                            epoch=fold_idx,
+                            tag=f'fold{fold_idx}_val',
+                            max_districts=max_visualize,
+                            device=fold_config.device,
+                            district_path=Path(fold_config.district_path) if hasattr(fold_config, 'district_path') else None
+                        )
+                        logger.info("Rank %d: Completed validation visualizations for fold %d", rank, fold_idx)
+                    except Exception as e:
+                        logger.error("Rank %d: Failed to generate validation visualizations for fold %d: %s", 
+                                   rank, fold_idx, e, exc_info=True)
 
         except Exception as exc:
             logger.error("Rank %d: Training failed for fold %d: %s", rank, fold_idx, exc, exc_info=True)
@@ -283,8 +337,8 @@ def train_cross_validation_sequential(config, dataset, args):
         fold_config.model_identifier = f"{config.model_identifier}_fold{fold_idx}"
 
         # Update paths - checkpoints stored per fold, but no separate tensorboard logs
-        fold_config.checkpoint_dir = f"{config.output_root_dir}/checkpoints/fold{fold_idx}"
-        fold_config.output_dir = f"{config.output_root_dir}/output_{config.model_identifier}_fold{fold_idx}"
+        fold_config.checkpoint_dir = f"{config.checkpoint_dir}/fold{fold_idx}"
+        fold_config.output_dir = f"{config.output_dir}/fold{fold_idx}"
 
         # Disable individual TensorBoard writers for each fold (we use shared writer)
         fold_config.enable_tensorboard = False
@@ -343,6 +397,47 @@ def train_cross_validation_sequential(config, dataset, args):
 
                 # Log best validation accuracy as a scalar
                 shared_writer.add_scalar('cross_validation/best_val_acc_by_fold', best_val_acc, fold_idx)
+
+                # Generate visualizations for this fold
+                logger.info("Generating visualizations for fold %d...", fold_idx)
+
+                # Visualize training data
+                if train_data:
+                    try:
+                        max_visualize = getattr(fold_config, 'max_visualize_districts', 5)
+                        log_district_visualizations_to_tensorboard(
+                            writer=shared_writer,
+                            model=model,
+                            data_list=train_data[:max_visualize],
+                            building_path=Path(fold_config.building_path),
+                            epoch=fold_idx,  # Use fold index as "epoch" for organization
+                            tag=f'fold{fold_idx}_train',
+                            max_districts=max_visualize,
+                            device=fold_config.device,
+                            district_path=Path(fold_config.district_path) if hasattr(fold_config, 'district_path') else None
+                        )
+                        logger.info("Completed training visualizations for fold %d", fold_idx)
+                    except Exception as e:
+                        logger.error("Failed to generate training visualizations for fold %d: %s", fold_idx, e, exc_info=True)
+
+                # Visualize validation data
+                if val_data:
+                    try:
+                        max_visualize = getattr(fold_config, 'max_visualize_districts', 5)
+                        log_district_visualizations_to_tensorboard(
+                            writer=shared_writer,
+                            model=model,
+                            data_list=val_data[:max_visualize],
+                            building_path=Path(fold_config.building_path),
+                            epoch=fold_idx,  # Use fold index as "epoch" for organization
+                            tag=f'fold{fold_idx}_val',
+                            max_districts=max_visualize,
+                            device=fold_config.device,
+                            district_path=Path(fold_config.district_path) if hasattr(fold_config, 'district_path') else None
+                        )
+                        logger.info("Completed validation visualizations for fold %d", fold_idx)
+                    except Exception as e:
+                        logger.error("Failed to generate validation visualizations for fold %d: %s", fold_idx, e, exc_info=True)
 
         except KeyboardInterrupt:
             logger.info("Training interrupted by user")

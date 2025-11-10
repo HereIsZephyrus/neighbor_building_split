@@ -20,7 +20,6 @@ Design Rationale:
 
 import numpy as np
 import pandas as pd
-import geopandas as gpd
 from typing import Tuple, Optional, List, Dict
 from sklearn.cluster import SpectralClustering
 from sklearn.metrics.pairwise import cosine_similarity
@@ -389,7 +388,8 @@ def estimate_optimal_clusters(
 def merge_small_clusters(
     cluster_assignments: np.ndarray,
     building_ids: List,
-    voronoi_gdf: gpd.GeoDataFrame,
+    voronoi_areas: Dict[int, float],
+    adjacency_matrix: pd.DataFrame,
     gat_labels: np.ndarray,
     cluster_to_label: Dict[int, int],
     area_threshold_m2: float = 1_000_000
@@ -400,7 +400,8 @@ def merge_small_clusters(
     Args:
         cluster_assignments: Current cluster assignments (N,)
         building_ids: List of building IDs corresponding to cluster assignments
-        voronoi_gdf: GeoDataFrame containing voronoi polygons with building IDs
+        voronoi_areas: Dictionary mapping building ID to voronoi area (m²)
+        adjacency_matrix: Distance-based adjacency matrix (N, N) for spatial relationships
         gat_labels: GAT predicted labels (N,)
         cluster_to_label: Current mapping from cluster ID to GAT label
         area_threshold_m2: Area threshold in square meters (default: 1km² = 1,000,000 m²)
@@ -409,43 +410,25 @@ def merge_small_clusters(
         merged_assignments: Updated cluster assignments after merging (N,)
         merged_cluster_to_label: Updated cluster-to-label mapping
     """
-    if voronoi_gdf is None or len(voronoi_gdf) == 0:
-        logger.warning("No voronoi data provided, skipping cluster merging")
+    if voronoi_areas is None or len(voronoi_areas) == 0:
+        logger.warning("No voronoi area data provided, skipping cluster merging")
         return cluster_assignments, cluster_to_label
 
     logger.info("Starting cluster merging with area threshold %.2f km²", area_threshold_m2 / 1_000_000)
 
     # Create mapping from building ID to cluster
     building_to_cluster = {bid: cluster for bid, cluster in zip(building_ids, cluster_assignments)}
-    building_to_gat_label = {bid: label for bid, label in zip(building_ids, gat_labels)}
-
-    # Find ID field in voronoi GeoDataFrame
-    id_field = None
-    for possible_id in ['FID', 'OBJECTID', 'ID', 'id', 'building_id']:
-        if possible_id in voronoi_gdf.columns:
-            id_field = possible_id
-            break
-
-    if id_field is None:
-        logger.warning("No ID field found in voronoi data, cannot merge clusters")
-        return cluster_assignments, cluster_to_label
-
-    # Assign cluster ID to each voronoi polygon
-    voronoi_gdf = voronoi_gdf.copy()
-    voronoi_gdf['cluster'] = voronoi_gdf[id_field].map(building_to_cluster)
-    voronoi_gdf = voronoi_gdf[voronoi_gdf['cluster'].notna()].copy()
 
     # Calculate total area per cluster
     cluster_areas = {}
     unique_clusters = np.unique(cluster_assignments)
 
     for cluster_id in unique_clusters:
-        cluster_voronoi = voronoi_gdf[voronoi_gdf['cluster'] == cluster_id]
-        if len(cluster_voronoi) > 0:
-            total_area = cluster_voronoi.geometry.area.sum()
-            cluster_areas[int(cluster_id)] = total_area
-        else:
-            cluster_areas[int(cluster_id)] = 0.0
+        # Find all buildings in this cluster
+        cluster_buildings = [bid for bid, cid in building_to_cluster.items() if cid == cluster_id]
+        # Sum their voronoi areas
+        total_area = sum(voronoi_areas.get(bid, 0.0) for bid in cluster_buildings)
+        cluster_areas[int(cluster_id)] = total_area
 
     logger.debug("Cluster areas (m²): %s", {k: f"{v:.2f}" for k, v in cluster_areas.items()})
 
@@ -459,19 +442,28 @@ def merge_small_clusters(
         return cluster_assignments, cluster_to_label
 
     # Create adjacency graph of clusters (which clusters are neighbors)
+    # Use the adjacency matrix to determine which buildings are connected
     cluster_neighbors = {int(cid): set() for cid in unique_clusters}
 
-    # Build cluster adjacency from voronoi topology
-    for idx1 in range(len(voronoi_gdf)):
-        for idx2 in range(idx1 + 1, len(voronoi_gdf)):
-            geom1 = voronoi_gdf.iloc[idx1].geometry
-            geom2 = voronoi_gdf.iloc[idx2].geometry
-            cluster1 = int(voronoi_gdf.iloc[idx1]['cluster'])
-            cluster2 = int(voronoi_gdf.iloc[idx2]['cluster'])
+    # Build cluster adjacency from building adjacency matrix
+    adjacency_values = adjacency_matrix.values
+    adjacency_row_ids = list(adjacency_matrix.index)
+    adjacency_col_ids = list(adjacency_matrix.columns)
 
-            if cluster1 != cluster2 and geom1.touches(geom2):
-                cluster_neighbors[cluster1].add(cluster2)
-                cluster_neighbors[cluster2].add(cluster1)
+    for i, row_id in enumerate(adjacency_row_ids):
+        if row_id not in building_to_cluster:
+            continue
+        cluster_i = int(building_to_cluster[row_id])
+
+        for j, col_id in enumerate(adjacency_col_ids):
+            if col_id not in building_to_cluster:
+                continue
+            cluster_j = int(building_to_cluster[col_id])
+
+            # If buildings are adjacent (non-zero distance) and in different clusters
+            if cluster_i != cluster_j and adjacency_values[i, j] > 0:
+                cluster_neighbors[cluster_i].add(cluster_j)
+                cluster_neighbors[cluster_j].add(cluster_i)
 
     # Merge small clusters with neighboring clusters of same GAT label
     merged_assignments = cluster_assignments.copy()
@@ -523,7 +515,7 @@ def perform_spectral_clustering_pipeline(
     adjacency_matrix: pd.DataFrame,
     gat_labels: np.ndarray,
     building_ids: Optional[List] = None,
-    voronoi_gdf: Optional[gpd.GeoDataFrame] = None,
+    voronoi_areas: Optional[Dict[int, float]] = None,
     n_clusters: Optional[int] = None,
     gat_logits: Optional[np.ndarray] = None,
     use_confidence_weighted_voting: bool = True,
@@ -551,8 +543,8 @@ def perform_spectral_clustering_pipeline(
         features: Morphological clustering features (N, D_feat) - shape, size, orientation
         adjacency_matrix: Distance-based adjacency (N, N) - spatial relationships
         gat_labels: GAT predicted labels (N,) - initial classification from GAT
-        building_ids: List of building IDs (for voronoi matching in merging)
-        voronoi_gdf: GeoDataFrame with voronoi polygons (for area-based merging)
+        building_ids: List of building IDs (for area-based merging)
+        voronoi_areas: Dictionary mapping building ID to voronoi area in m² (for area-based merging)
         n_clusters: Number of clusters (auto-estimate with oversampling if None)
         gat_logits: GAT classification logits (N, num_classes) - for confidence weighting
         use_confidence_weighted_voting: Whether to use confidence-weighted voting (default True)
@@ -616,12 +608,13 @@ def perform_spectral_clustering_pipeline(
 
     # Step 5: Merge small clusters based on voronoi area threshold
     # This ensures spatially significant clusters while maintaining spatial consistency
-    if building_ids is not None and voronoi_gdf is not None:
+    if building_ids is not None and voronoi_areas is not None:
         logger.info("Merging small clusters (threshold: %.2f km²)", area_threshold_m2 / 1_000_000)
         cluster_assignments, cluster_to_label = merge_small_clusters(
             cluster_assignments=cluster_assignments,
             building_ids=building_ids,
-            voronoi_gdf=voronoi_gdf,
+            voronoi_areas=voronoi_areas,
+            adjacency_matrix=adjacency_matrix,
             gat_labels=gat_labels,
             cluster_to_label=cluster_to_label,
             area_threshold_m2=area_threshold_m2
@@ -631,7 +624,7 @@ def perform_spectral_clustering_pipeline(
         final_labels = np.array([cluster_to_label[int(c)] for c in cluster_assignments])
         logger.info("Updated final labels after cluster merging")
     else:
-        logger.info("Skipping cluster merging (no building IDs or voronoi data provided)")
+        logger.info("Skipping cluster merging (no building IDs or voronoi area data provided)")
 
     logger.info("Spectral clustering pipeline completed successfully: %d final clusters",
                 len(np.unique(cluster_assignments)))

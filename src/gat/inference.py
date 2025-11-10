@@ -203,17 +203,14 @@ def generate_embeddings_for_district(
         # Extract clustering features (12 base features)
         clustering_features = extract_clustering_features(buildings_gdf)
 
-        # Load voronoi data for cluster merging
-        voronoi_path = adjacency_dir / f"district_{district_id}_voronoi.shp"
-        voronoi_gdf = None
-        if voronoi_path.exists():
-            try:
-                voronoi_gdf = gpd.read_file(voronoi_path)
-                logger.debug(f"Loaded voronoi data for district {district_id}: {len(voronoi_gdf)} polygons")
-            except Exception as e:
-                logger.warning(f"Failed to load voronoi data for district {district_id}: {e}")
+        # Extract voronoi areas from building data for cluster merging
+        voronoi_areas = None
+        if 'voroniarea' in buildings_gdf.columns:
+            # Create dictionary mapping building ID to voronoi area
+            voronoi_areas = dict(zip(building_ids_in_matrix, buildings_gdf['voroniarea'].values))
+            logger.debug(f"Extracted voronoi areas for district {district_id}: {len(voronoi_areas)} buildings")
         else:
-            logger.warning(f"Voronoi file not found: {voronoi_path}")
+            logger.warning(f"'voroniarea' field not found in building data for district {district_id}")
 
         # Move to device
         data = data.to(device)
@@ -289,7 +286,7 @@ def generate_embeddings_for_district(
                     gat_labels=gat_labels_np,
                     gat_logits=logits_np,  # Pass logits for confidence-weighted voting
                     building_ids=building_ids_in_matrix,
-                    voronoi_gdf=voronoi_gdf,
+                    voronoi_areas=voronoi_areas,
                     n_clusters=n_clusters,
                     use_confidence_weighted_voting=use_confidence_weighted,
                     embedding_weight=embedding_weight,

@@ -117,6 +117,7 @@ def parse_args():
 
 def main():
     """Main entry point."""
+    print("Starting GAT model training and inference...")
     args = parse_args()
 
     if args.train and args.inference:

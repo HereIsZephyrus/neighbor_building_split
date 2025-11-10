@@ -151,7 +151,7 @@ def main(args=None):
     use_mpi = False
     current_rank = 0
     world_size = 1
-    
+
     if MPI_AVAILABLE:
         try:
             comm_temp = MPI.COMM_WORLD

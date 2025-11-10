@@ -511,7 +511,8 @@ class Trainer:
                         epoch=epoch,
                         tag='train_final',
                         max_districts=self.config.max_visualize_districts,
-                        device=str(self.device)
+                        device=str(self.device),
+                        district_path=Path(self.config.district_path) if hasattr(self.config, 'district_path') else None
                     )
                 except Exception as e:
                     logger.error(f"Failed to generate training visualizations: {e}", exc_info=True)
@@ -527,7 +528,8 @@ class Trainer:
                         epoch=epoch,
                         tag='val_final',
                         max_districts=self.config.max_visualize_districts,
-                        device=str(self.device)
+                        device=str(self.device),
+                        district_path=Path(self.config.district_path) if hasattr(self.config, 'district_path') else None
                     )
                 except Exception as e:
                     logger.error(f"Failed to generate validation visualizations: {e}", exc_info=True)

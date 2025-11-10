@@ -126,8 +126,8 @@ def train_single_fold_mpi(
     # create fold-specific configuration
     fold_config = copy.deepcopy(config)
     fold_config.model_identifier = f"{config.model_identifier}_fold{fold_idx}"
-    fold_config.checkpoint_dir = f"{config.output_root_dir}/checkpoints/fold{fold_idx}"
-    fold_config.output_dir = f"{config.output_root_dir}/output_{config.model_identifier}_fold{fold_idx}"
+    fold_config.checkpoint_dir = f"{config.checkpoint_dir}/fold{fold_idx}"
+    fold_config.output_dir = f"{config.output_dir}/fold{fold_idx}"
     fold_config.enable_tensorboard = False  # use shared writer
 
     Path(fold_config.checkpoint_dir).mkdir(parents=True, exist_ok=True)

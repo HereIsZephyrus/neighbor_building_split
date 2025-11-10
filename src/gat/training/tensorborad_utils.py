@@ -135,7 +135,8 @@ def log_district_visualizations_to_tensorboard(
     epoch: int,
     tag: str = 'train',
     max_districts: int = 5,
-    device: str = 'cuda'
+    device: str = 'cuda',
+    district_path: Path = None
 ) -> None:
     """
     Log district visualizations to TensorBoard.
@@ -149,6 +150,7 @@ def log_district_visualizations_to_tensorboard(
         tag: Tag prefix for TensorBoard (e.g., 'train', 'val')
         max_districts: Maximum number of districts to visualize
         device: Device to run model on
+        district_path: Path to district shapefile (for spatial matching)
     """
     if not data_list:
         logger.warning("No data provided for visualization")
@@ -162,6 +164,15 @@ def log_district_visualizations_to_tensorboard(
     except Exception as e:
         logger.error(f"Failed to load building geometries: {e}")
         return
+
+    # Load district geometries if provided
+    districts_gdf = None
+    if district_path and district_path.exists():
+        try:
+            districts_gdf = gpd.read_file(district_path)
+            logger.info(f"Loaded district geometries from {district_path}")
+        except Exception as e:
+            logger.warning(f"Failed to load district geometries: {e}. Will try field-based matching.")
 
     # Set model to evaluation mode
     model.eval()
@@ -183,20 +194,33 @@ def log_district_visualizations_to_tensorboard(
                 ground_truth = data.y.cpu().numpy()
 
                 # Get building geometries for this district
-                # Assume buildings have a 'district_id' or 'FID' field
-                district_id_field = None
-                for field in ['district_id', 'FID', 'id']:
-                    if field in buildings_all.columns:
-                        district_id_field = field
-                        break
+                district_buildings = None
+                
+                # Method 1: Use spatial matching with district geometry (preferred)
+                if districts_gdf is not None:
+                    try:
+                        district_geom = districts_gdf[districts_gdf['FID'] == district_id].geometry
+                        if len(district_geom) > 0:
+                            district_geom = district_geom.iloc[0]
+                            # Use spatial intersection to get buildings
+                            district_buildings = buildings_all[buildings_all.intersects(district_geom)].copy()
+                            logger.debug(f"District {district_id}: Found {len(district_buildings)} buildings using spatial matching")
+                    except Exception as e:
+                        logger.debug(f"Spatial matching failed for district {district_id}: {e}")
+                
+                # Method 2: Fall back to field-based matching
+                if district_buildings is None or len(district_buildings) == 0:
+                    district_id_field = None
+                    for field in ['district_id', 'FID', 'id', 'TAZ_ID']:
+                        if field in buildings_all.columns:
+                            district_id_field = field
+                            break
+                    
+                    if district_id_field is not None:
+                        district_buildings = buildings_all[buildings_all[district_id_field] == district_id].copy()
+                        logger.debug(f"District {district_id}: Found {len(district_buildings)} buildings using field '{district_id_field}'")
 
-                if district_id_field is None:
-                    logger.warning(f"No district_id field found in building shapefile")
-                    continue
-
-                district_buildings = buildings_all[buildings_all[district_id_field] == district_id].copy()
-
-                if len(district_buildings) == 0:
+                if district_buildings is None or len(district_buildings) == 0:
                     logger.warning(f"No buildings found for district {district_id}")
                     continue
 

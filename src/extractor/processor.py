@@ -4,7 +4,7 @@ from .chunk_processor import process_district_chunked
 
 logger = get_logger()
 
-def process_district(config, reader, rasterizer, district_row, idx, voronoi_generator=None):
+def process_district(config, reader, rasterizer, district_row, idx, voronoi_generator=None, mpi_size=1):
     """Process a district."""
     # Extract district ID from FID field (fallback to index if not present)
     district_id = district_row.get("FID", district_row.get("fid", idx))
@@ -44,11 +44,11 @@ def process_district(config, reader, rasterizer, district_row, idx, voronoi_gene
 
             # Delegate to chunked processing
             success = process_district_chunked(
-                config, reader, rasterizer, district_row, idx, voronoi_generator
+                config, reader, rasterizer, district_row, idx, voronoi_generator, mpi_size
             )
 
             if not success:
-                logger.error("Chunked processing failed for district %s", district_id)
+                logger.warning("Chunked processing returned failure for district %s", district_id)
 
             return
 

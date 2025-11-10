@@ -89,7 +89,7 @@ def read_landsat8_bands(image_path: str, scale_factor=0.0000275, offset=-0.2) ->
 
     Returns:
         Tuple of (band_data dict, profile dict, nodata_value)
-        
+
     Note:
         Landsat 8 Collection 2: reflectance = DN * 0.0000275 - 0.2
         Landsat 8 Collection 1: reflectance = DN * 0.0001
@@ -116,22 +116,22 @@ def read_landsat8_bands(image_path: str, scale_factor=0.0000275, offset=-0.2) ->
 
         # Get nodata value from metadata
         original_nodata = src.nodata if src.nodata is not None else 0
-        
+
         band_data = {}
         for band_name, band_idx in band_mapping.items():
             if band_idx <= src.count:
                 # Read band as float32
                 dn_values = src.read(band_idx).astype(np.float32)
-                
+
                 # Create mask for valid data (not nodata)
                 valid_mask = (dn_values != original_nodata) if original_nodata is not None else np.ones_like(dn_values, dtype=bool)
-                
+
                 # Convert DN to surface reflectance: reflectance = DN * scale_factor + offset
                 reflectance = np.full_like(dn_values, -9999.0, dtype=np.float32)
                 reflectance[valid_mask] = dn_values[valid_mask] * scale_factor + offset
-                
+
                 band_data[band_name.upper()] = reflectance
-                
+
                 print(f"  {band_name}: DN range [{np.min(dn_values[valid_mask]):.0f}, {np.max(dn_values[valid_mask]):.0f}] "
                       f"-> Reflectance range [{np.min(reflectance[valid_mask]):.4f}, {np.max(reflectance[valid_mask]):.4f}]")
             else:
@@ -232,10 +232,10 @@ Examples:
 Note:
     Input file should be a Landsat 8 Surface Reflectance (SR) product with DN values.
     The script converts DN to reflectance using: reflectance = DN * scale_factor + offset
-    
+
     Landsat 8 Collection 2 (default): scale_factor=0.0000275, offset=-0.2
     Landsat 8 Collection 1: scale_factor=0.0001, offset=0.0
-    
+
     The script uses Liang (2000) formula with USGS recommended parameters.
         """
     )

@@ -23,18 +23,57 @@ TAG_REQUEST = 1  # Worker requests a task
 TAG_TASK = 2     # Master sends a task
 TAG_TERMINATE = 3  # Master tells worker to terminate
 
-def master_task_distributor(comm, size, districts, logger):
+def is_district_already_processed(district_row, idx, config):
+    """
+    Check if district has already been processed.
+
+    Args:
+        district_row: District row from GeoDataFrame
+        idx: District index
+        config: Configuration object
+
+    Returns:
+        True if output files already exist, False otherwise
+    """
+    district_id = district_row.get("FID", district_row.get("fid", idx))
+
+    if config.generate_voronoi_diagram:
+        # Check for Voronoi output files
+        voronoi_shp = config.voronoi_dir / f"district_{district_id}_voronoi.shp"
+        adjacency_pkl = config.voronoi_dir / f"district_{district_id}_adjacency.pkl"
+        return voronoi_shp.exists() and adjacency_pkl.exists()
+    elif config.generate_raw_raster:
+        # Check for raster output file
+        raster_path = config.image_dir / f"district_{district_id}_raster.tif"
+        return raster_path.exists()
+
+    return False
+
+def master_task_distributor(comm, size, districts, config, logger):
     """Master process: distribute tasks dynamically to workers."""
     num_districts = len(districts)
+    districts_list = list(districts.iterrows())
     task_idx = 0
     completed_count = 0
+    skipped_count = 0
 
     logger.info("Master: Starting dynamic task distribution for %d districts", num_districts)
 
     # Initial task distribution: send one task to each worker
     for worker_rank in range(1, size):
+        # Find next unprocessed task
+        while task_idx < num_districts:
+            idx, district_row = districts_list[task_idx]
+            if is_district_already_processed(district_row, idx, config):
+                logger.info("Master: District %s already processed, skipping task %d", idx, task_idx)
+                task_idx += 1
+                skipped_count += 1
+                completed_count += 1
+            else:
+                break
+
         if task_idx < num_districts:
-            idx, district_row = list(districts.iterrows())[task_idx]
+            idx, district_row = districts_list[task_idx]
             comm.send(task_idx, dest=worker_rank, tag=TAG_TASK)
             logger.info("Master: Assigned task %d (district %s, area %.2f m²) to worker %d", 
                        task_idx, idx, district_row.get('area', district_row.geometry.area), worker_rank)
@@ -53,12 +92,23 @@ def master_task_distributor(comm, size, districts, logger):
 
         # Log progress
         if completed_count % 10 == 0 or completed_count == num_districts:
-            logger.info("Master: Progress %d/%d districts completed (%.1f%%)", 
-                       completed_count, num_districts, completed_count / num_districts * 100)
+            logger.info("Master: Progress %d/%d districts completed (%.1f%%, %d skipped)", 
+                       completed_count, num_districts, completed_count / num_districts * 100, skipped_count)
+
+        # Find next unprocessed task
+        while task_idx < num_districts:
+            idx, district_row = districts_list[task_idx]
+            if is_district_already_processed(district_row, idx, config):
+                logger.info("Master: District %s already processed, skipping task %d", idx, task_idx)
+                task_idx += 1
+                skipped_count += 1
+                completed_count += 1
+            else:
+                break
 
         # Assign new task or send termination signal
         if task_idx < num_districts:
-            idx, district_row = list(districts.iterrows())[task_idx]
+            idx, district_row = districts_list[task_idx]
             comm.send(task_idx, dest=worker_rank, tag=TAG_TASK)
             logger.info("Master: Assigned task %d (district %s, area %.2f m²) to worker %d", 
                        task_idx, idx, district_row.get('area', district_row.geometry.area), worker_rank)
@@ -67,9 +117,10 @@ def master_task_distributor(comm, size, districts, logger):
             # No more tasks, send terminate signal
             comm.send(-1, dest=worker_rank, tag=TAG_TERMINATE)
 
-    logger.info("Master: All %d districts completed", num_districts)
+    logger.info("Master: All %d districts completed (%d processed, %d skipped)", 
+                num_districts, num_districts - skipped_count, skipped_count)
 
-def worker_process_tasks(comm, rank, districts, config, reader, rasterizer, voronoi_generator, logger):
+def worker_process_tasks(comm, rank, size, districts, config, reader, rasterizer, voronoi_generator, logger):
     """Worker process: process tasks received from master."""
     completed = 0
     districts_list = list(districts.iterrows())
@@ -84,7 +135,7 @@ def worker_process_tasks(comm, rank, districts, config, reader, rasterizer, voro
         try:
             process_district(
                 config, reader, rasterizer, district_row, idx,
-                voronoi_generator=voronoi_generator
+                voronoi_generator=voronoi_generator, mpi_size=size
             )
             completed += 1
         except Exception as exc:
@@ -269,12 +320,12 @@ def main():
         # Use dynamic task distribution (master-worker pattern)
         if rank == 0:
             # Master process: distribute tasks
-            master_task_distributor(comm, size, districts, logger)
+            master_task_distributor(comm, size, districts, config, logger)
             logger.info("All MPI processes completed")
         else:
             # Worker process: receive and process tasks
             worker_process_tasks(
-                comm, rank, districts, config, reader, rasterizer,
+                comm, rank, size, districts, config, reader, rasterizer,
                 voronoi_generator, logger
             )
 
@@ -289,7 +340,7 @@ def main():
             try:
                 process_district(
                     config, reader, rasterizer, district_row, idx,
-                    voronoi_generator=voronoi_generator
+                    voronoi_generator=voronoi_generator, mpi_size=1
                 )
             except Exception as exc:
                 logger.error("Error processing district %s: %s",

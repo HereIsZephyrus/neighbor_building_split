@@ -5,6 +5,7 @@ from pathlib import Path
 from typing import List, Dict, Any
 import torch
 import yaml
+from datetime import datetime
 
 
 @dataclass
@@ -52,7 +53,8 @@ class GATConfig:
     checkpoint_dir: str = "models"  # Model checkpoints
     log_dir: str = "runs"  # TensorBoard logs
     output_dir: str = "output"  # Output embeddings
-
+    config_backup_dir: str = "training_configs"  # Training config backups
+    config_dict_dir: str = "config_dicts"  # Training config dicts
     # Device and optimization
     device: str = field(default_factory=lambda: "cuda" if torch.cuda.is_available() else "cpu")
     use_amp: bool = False  # Use automatic mixed precision (optional for 8GB GPU)
@@ -224,7 +226,10 @@ class GATConfig:
         params.update(resource_path)
 
         # Construct output subdirectories based on output_dir
-        params['checkpoint_dir'] = f"{params['output_root_dir']}/checkpoints"
-        params['log_dir'] = f"{params['output_root_dir']}/logs"
-        params['output_dir'] = f"{params['output_root_dir']}/output_{params['model_identifier']}"
+        params['log_dir'] = f"{params['output_root_dir']}/logs/{params['model_identifier']}"
+        params['model_identifier'] = f"{params['model_identifier']}_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+        params['checkpoint_dir'] = f"{params['output_root_dir']}/checkpoints/{params['model_identifier']}"
+        params['output_dir'] = f"{params['output_root_dir']}/output/{params['model_identifier']}"
+        params['config_backup_dir'] = f"{params['output_root_dir']}/training_configs"
+        params['config_dict_dir'] = f"{params['output_root_dir']}/config_dicts"
         return cls(**params)

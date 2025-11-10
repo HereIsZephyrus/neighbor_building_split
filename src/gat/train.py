@@ -7,7 +7,6 @@ Usage:
 import argparse
 import sys
 from pathlib import Path
-from datetime import datetime
 import shutil
 import yaml
 
@@ -132,11 +131,19 @@ def main(args=None):
     # Create output directory structure
     building_dataset = BuildingDataset(config.building_path)
     district_dataset = DistrictDataset(config.district_path)
+    # mkdir for output_root_dir
+    Path(config.output_root_dir).mkdir(parents=True, exist_ok=True)
+    Path(config.checkpoint_dir).mkdir(parents=True, exist_ok=True)
+    Path(config.log_dir).mkdir(parents=True, exist_ok=True)
+    Path(config.output_dir).mkdir(parents=True, exist_ok=True)
+    Path(config.config_backup_dir).mkdir(parents=True, exist_ok=True)
+    Path(config.config_dict_dir).mkdir(parents=True, exist_ok=True)
     print(f"Output directory: {config.output_root_dir}")
     print(f"  - Checkpoints: {config.checkpoint_dir}")
     print(f"  - Logs: {config.log_dir}")
-    print(f"  - Embeddings: {config.output_dir}")
-
+    print(f"  - Outputs: {config.output_dir}")
+    print(f"  - Config backups: {config.config_backup_dir}")
+    print(f"  - Config dicts: {config.config_dict_dir}")
     # Save training config to output directory for reference (MPI-safe: only rank 0)
     # Get rank before saving to avoid multiple processes writing simultaneously
     current_rank = 0
@@ -148,13 +155,13 @@ def main(args=None):
             pass
 
     if current_rank == 0:
-        config_backup_path = Path(config.output_root_dir) / f'training_config_{config.model_identifier}.yaml'
+        config_backup_path = Path(config.config_backup_dir) / f'{config.model_identifier}.yaml'
         try:
             shutil.copy(config_path, config_backup_path)
             print(f"Training config saved to: {config_backup_path}")
 
             # Also save the full config as a dict for easier inspection
-            config_dict_path = Path(config.output_root_dir) / f'config_dict_{config.model_identifier}.yaml'
+            config_dict_path = Path(config.config_dict_dir) / f'{config.model_identifier}.yaml'
             with open(config_dict_path, 'w', encoding='utf-8') as f:
                 yaml.dump(config.to_dict(), f, default_flow_style=False, allow_unicode=True)
             print(f"Config dict saved to: {config_dict_path}")
@@ -171,11 +178,10 @@ def main(args=None):
     else:
         rank = 0
 
-    timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
     if rank == 0:
-        log_file = Path(config.log_dir) / f"{config.model_identifier}_training_{timestamp}.log"
+        log_file = Path(config.log_dir) / f"{config.model_identifier}_training.log"
     else:
-        log_file = Path(config.log_dir) / f"{config.model_identifier}_training_{timestamp}_rank{rank}.log"
+        log_file = Path(config.log_dir) / f"{config.model_identifier}_training_rank{rank}.log"
 
     logger = setup_logger(name='gat', log_file=log_file)
 

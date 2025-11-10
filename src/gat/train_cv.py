@@ -209,7 +209,7 @@ def train_cross_validation_mpi(config, dataset, args):
                 logger.info("TensorBoard logs saved")
 
             # Save CV summary
-            cv_summary_path = Path(config.output_root_dir) / f'cv_summary_{config.model_identifier}.yaml'
+            cv_summary_path = Path(config.output_dir) / f'cv_summary_{config.model_identifier}.yaml'
             cv_summary = {
                 'n_folds': n_folds,
                 'fold_results': [

@@ -286,8 +286,14 @@ def generate_embeddings_for_district(
                     distance_scale = spectral_config.get('distance_scale', 100.0)
                     use_confidence_weighted = spectral_config.get('use_confidence_weighted_voting', True)
                     min_component_size = spectral_config.get('min_component_size', 3)
-                    logger.info("Loaded spectral clustering config: emb=%.2f, feat=%.2f, dist=%.2f, conf_weighted=%s, min_comp_size=%d",
-                               embedding_weight, feature_weight, distance_weight, use_confidence_weighted, min_component_size)
+                    min_cluster_size = spectral_config.get('min_cluster_size', 5)
+                    max_hops = spectral_config.get('max_hops', 3)
+                    logger.info(
+                        "Loaded spectral clustering config: emb=%.2f, feat=%.2f, dist=%.2f, "
+                        "conf_weighted=%s, min_comp_size=%d, min_cluster_size=%d, max_hops=%d",
+                        embedding_weight, feature_weight, distance_weight, 
+                        use_confidence_weighted, min_component_size, min_cluster_size, max_hops
+                    )
                 else:
                     # Use default values
                     embedding_weight = 0.3
@@ -296,6 +302,8 @@ def generate_embeddings_for_district(
                     distance_scale = 100.0
                     use_confidence_weighted = True
                     min_component_size = 3
+                    min_cluster_size = 5
+                    max_hops = 3
                     logger.warning("Config file not found, using default spectral clustering parameters")
 
                 # Use connected component separation to ensure spatial contiguity
@@ -359,7 +367,7 @@ def generate_embeddings_for_district(
                         comp_voronoi_areas = {bid: voronoi_areas[bid] for bid in comp_building_ids} if voronoi_areas else None
 
                         # Spectral clustering
-                        comp_clusters, comp_final_labels, comp_cluster_to_label, _ = perform_spectral_clustering_pipeline(
+                        comp_clusters, comp_final_labels, comp_cluster_to_label, _, cluster_stats = perform_spectral_clustering_pipeline(
                             embeddings=comp_embeddings_np,
                             features=comp_clustering_features,
                             adjacency_matrix=comp_adjacency,
@@ -373,11 +381,16 @@ def generate_embeddings_for_district(
                             feature_weight=feature_weight,
                             distance_weight=distance_weight,
                             distance_scale=distance_scale,
+                            min_cluster_size=min_cluster_size,
+                            max_hops=max_hops,
                             random_state=42
                         )
 
-                        num_clusters_comp = len(np.unique(comp_clusters))
-                        logger.debug(f"    ✓ Generated {num_clusters_comp} clusters")
+                        num_clusters_comp = cluster_stats['valid_clusters']
+                        logger.debug(
+                            f"    ✓ Generated {num_clusters_comp} valid clusters "
+                            f"({cluster_stats['buildings_reverted']} buildings reverted)"
+                        )
 
                     else:
                         # Small component: assign to category 9 (miscellaneous/small component)

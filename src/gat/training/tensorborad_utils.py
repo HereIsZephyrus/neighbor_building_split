@@ -442,7 +442,7 @@ def log_district_visualizations_to_tensorboard(
                                     comp_adjacency = extract_subgraph_from_adjacency(adjacency_matrix, comp_building_ids)
                                     comp_voronoi_areas = {bid: voronoi_areas[bid] for bid in comp_building_ids} if voronoi_areas else None
 
-                                    comp_clusters, comp_final_labels, _, _ = perform_spectral_clustering_pipeline(
+                                    comp_clusters, comp_final_labels, _, _, _ = perform_spectral_clustering_pipeline(
                                         embeddings=comp_embeddings_np,
                                         features=comp_clustering_features,
                                         adjacency_matrix=comp_adjacency,

@@ -173,6 +173,16 @@ class Trainer:
         else:
             logger.info("Using weighted CrossEntropyLoss to handle class imbalance")
 
+        # Create unweighted loss function for validation
+        self.val_criterion = create_loss_function(
+            num_classes=config.num_classes,
+            class_weights=None,  # No class weights for validation
+            focal_loss=use_focal_loss,
+            focal_gamma=focal_gamma,
+            label_smoothing=label_smoothing
+        )
+        logger.info("Validation will use unweighted loss for fair comparison across folds")
+
         # Early stopping
         self.early_stopping = EarlyStopping(
             patience=config.patience,
@@ -466,8 +476,8 @@ class Trainer:
             # Forward pass
             node_logits = self.model(data.x, data.edge_index)
 
-            # Classification loss
-            loss_cls = self.criterion(node_logits, data.y)
+            # Classification loss (use unweighted criterion for fair evaluation)
+            loss_cls = self.val_criterion(node_logits, data.y)
 
             # Spatial smoothness loss
             # Extract edge attributes if available and ensure it's on the correct device

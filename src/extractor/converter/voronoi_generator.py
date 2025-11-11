@@ -1,4 +1,4 @@
-"""Voronoi diagram generator using dilation method."""
+"""Generate Voronoi diagrams using morphological dilation."""
 
 from typing import Tuple, Optional
 import numpy as np
@@ -15,15 +15,10 @@ logger = get_logger(__name__)
 
 
 class VoronoiGenerator:
-    """Class for generating Voronoi-like diagrams using dilation method."""
+    """Generate Voronoi partitions using dilation-based approach."""
 
     def __init__(self, simplify_tolerance: float = 0.5):
-        """
-        Initialize Voronoi generator.
-
-        Args:
-            simplify_tolerance: Tolerance for line simplification in meters
-        """
+        """Initialize with line simplification tolerance in meters."""
         self.simplify_tolerance = simplify_tolerance
 
     def generate_voronoi_from_raster(
@@ -35,48 +30,23 @@ class VoronoiGenerator:
         debug_mode: bool = False,
     ) -> Tuple[np.ndarray, np.ndarray]:
         """
-        Generate Voronoi partition from building raster using dilation method.
-
-        This method:
-        1. Uses building IDs directly as seed labels (assumes each building is already a connected component)
-        2. Uses dilation to partition remaining space
-        3. Respects district boundaries
-
-        Args:
-            building_raster: 2D array with building IDs > 0, background = 0, outside = -999
-            district_mask: Binary mask (1 inside district, 0 outside)
-            visualize: Whether to visualize the dilation process with OpenCV
-            viz_interval: Show visualization every N iterations (default: 1)
-            debug_mode: If True, wait for SPACE key press to continue each step
-
-        Returns:
-            Tuple of (voronoi_partition, original_buildings_mask)
-            - voronoi_partition: Array with each region labeled with building IDs (0 for outside)
-            - original_buildings_mask: Binary mask of original building pixels
+        Generate Voronoi partition using morphological dilation.
+        
+        Returns (voronoi_partition, buildings_mask) where unclassified pixels are -999.
         """
-        logger.debug("Generating Voronoi diagram using dilation method")
-
-        # Create binary mask for buildings (any positive value is a building)
         building_binary = (building_raster > 0).astype(np.uint8)
         original_buildings_mask = building_binary.copy()
-
-        # Initialize Voronoi partition with building IDs directly
-        # No erosion needed - each building is guaranteed to be a connected component
         voronoi = building_raster.copy()
 
-        # Count number of unique building IDs
         unique_ids = np.unique(voronoi[voronoi > 0])
         num_features = len(unique_ids)
 
-        logger.info("Initialized Voronoi with %d buildings (IDs: %d to %d)", 
-                   num_features, unique_ids.min() if num_features > 0 else 0,
-                   unique_ids.max() if num_features > 0 else 0)
-
         if num_features == 0:
-            logger.warning("No buildings found, returning empty Voronoi diagram")
+            logger.warning("No buildings, returning empty diagram")
             return np.zeros_like(building_raster, dtype=np.int32), original_buildings_mask
 
-        # Dilate to partition remaining space
+        logger.debug("Dilating %d building regions", num_features)
+
         voronoi = self._dilate_labels(
             voronoi,
             district_mask,
@@ -87,32 +57,20 @@ class VoronoiGenerator:
             buildings_mask=original_buildings_mask
         )
 
-        # Set all unclassified pixels (inside district but not labeled) to -999 (NoData)
         unclassified_mask = (voronoi == 0) & (district_mask == 1)
         unclassified_count = unclassified_mask.sum()
         if unclassified_count > 0:
-            logger.warning("Setting %d unclassified pixels to NoData (-999)", unclassified_count)
+            logger.warning("%d unclassified pixels marked as NoData", unclassified_count)
             voronoi[unclassified_mask] = -999
-
-        logger.debug("Voronoi diagram generated with %d regions", num_features)
 
         return voronoi, original_buildings_mask
 
     def _generate_color_map(self, num_labels: int) -> np.ndarray:
-        """
-        Generate random colors for each label for visualization.
-
-        Args:
-            num_labels: Number of labels to generate colors for
-
-        Returns:
-            Color map array of shape (num_labels + 1, 3) with BGR colors
-        """
-        np.random.seed(42)  # For reproducibility
+        """Generate random BGR colors for visualization."""
+        np.random.seed(42)
         colors = np.zeros((num_labels + 1, 3), dtype=np.uint8)
-        colors[0] = [0, 0, 0]  # Black for unlabeled (background)
+        colors[0] = [0, 0, 0]
 
-        # Generate random colors for each label
         for i in range(1, num_labels + 1):
             colors[i] = np.random.randint(0, 256, size=3, dtype=np.uint8)
 
@@ -128,42 +86,25 @@ class VoronoiGenerator:
         debug_mode: bool = False,
         window_name: str = "Voronoi Dilation",
     ) -> None:
-        """
-        Visualize labeled array using color map.
-
-        Args:
-            labeled_array: Array with labels
-            color_map: Color map for labels (BGR format)
-            district_mask: Binary mask defining valid area
-            iteration: Current iteration number
-            buildings_mask: Binary mask of original buildings to overlay in white
-            debug_mode: If True, show debug information
-            window_name: Name of visualization window
-        """
-        # Create RGB visualization
+        """Visualize labeled array with iteration info and legend."""
         vis_img = np.zeros((*labeled_array.shape, 3), dtype=np.uint8)
 
-        # Apply colors based on labels
         for label in range(len(color_map)):
             mask = (labeled_array == label)
             vis_img[mask] = color_map[label]
 
-        # Mark outside district area as dark gray
         outside_mask = (district_mask == 0)
         vis_img[outside_mask] = [40, 40, 40]
 
-        # Critical fix: mark unlabeled pixels as red (inside district but no label)
         unlabeled_mask = (labeled_array == 0) & (district_mask == 1)
-        vis_img[unlabeled_mask] = [0, 0, 255]  # BGR: red indicates unlabeled
+        vis_img[unlabeled_mask] = [0, 0, 255]
 
-        # Overlay buildings in white (on top of voronoi colors)
         if buildings_mask is not None:
             building_pixels = (buildings_mask > 0)
-            vis_img[building_pixels] = [255, 255, 255]  # White for buildings
+            vis_img[building_pixels] = [255, 255, 255]
 
-        # Resize for better viewing - use larger minimum size
         h, w = vis_img.shape[:2]
-        min_size = 1200  # Increased from 800
+        min_size = 1200
         if h < min_size or w < min_size:
             scale = max(min_size / h, min_size / w)
             new_h, new_w = int(h * scale), int(w * scale)
@@ -171,44 +112,21 @@ class VoronoiGenerator:
 
         display_img = vis_img.copy()
 
-        # Add iteration counter text (with larger font and background for better visibility)
         text = f"Iteration: {iteration}"
-        (text_w, text_h), baseline = cv2.getTextSize(
-            text, cv2.FONT_HERSHEY_SIMPLEX, 1.2, 2
-        )
+        (text_w, text_h), baseline = cv2.getTextSize(text, cv2.FONT_HERSHEY_SIMPLEX, 1.2, 2)
         cv2.rectangle(display_img, (5, 5), (text_w + 15, text_h + baseline + 15), (0, 0, 0), -1)
-        cv2.putText(
-            display_img,
-            text,
-            (10, text_h + 10),
-            cv2.FONT_HERSHEY_SIMPLEX,
-            1.2,
-            (255, 255, 255),
-            2,
-            cv2.LINE_AA
-        )
+        cv2.putText(display_img, text, (10, text_h + 10), cv2.FONT_HERSHEY_SIMPLEX,
+                    1.2, (255, 255, 255), 2, cv2.LINE_AA)
 
-        # Calculate remaining unlabeled pixels
         unlabeled = ((labeled_array == 0) & (district_mask == 1)).sum()
-        # If there are unlabeled pixels, use red warning; otherwise use cyan
         text_color = (0, 0, 255) if unlabeled > 0 else (0, 255, 255)
         progress_text = f"Unlabeled: {unlabeled} pixels" + (" (RED)" if unlabeled > 0 else "")
         text_y = text_h + baseline + 35
-        (prog_w, prog_h), prog_baseline = cv2.getTextSize(
-            progress_text, cv2.FONT_HERSHEY_SIMPLEX, 0.9, 2
-        )
+        (prog_w, prog_h), prog_baseline = cv2.getTextSize(progress_text, cv2.FONT_HERSHEY_SIMPLEX, 0.9, 2)
         cv2.rectangle(display_img, (5, text_y - prog_h - 5), 
                      (prog_w + 15, text_y + prog_baseline + 5), (0, 0, 0), -1)
-        cv2.putText(
-            display_img,
-            progress_text,
-            (10, text_y),
-            cv2.FONT_HERSHEY_SIMPLEX,
-            0.9,
-            text_color,
-            2,
-            cv2.LINE_AA
-        )
+        cv2.putText(display_img, progress_text, (10, text_y), cv2.FONT_HERSHEY_SIMPLEX,
+                    0.9, text_color, 2, cv2.LINE_AA)
 
         legend_y = text_y + prog_h + prog_baseline + 20
         legend_texts = [
@@ -220,36 +138,17 @@ class VoronoiGenerator:
 
         for i, (text, color) in enumerate(legend_texts):
             legend_y_pos = legend_y + i * 22
-            cv2.putText(
-                display_img,
-                text,
-                (10, legend_y_pos),
-                cv2.FONT_HERSHEY_SIMPLEX,
-                0.5,
-                color,
-                1,
-                cv2.LINE_AA
-            )
+            cv2.putText(display_img, text, (10, legend_y_pos), cv2.FONT_HERSHEY_SIMPLEX,
+                       0.5, color, 1, cv2.LINE_AA)
 
-        # Add debug mode hint if enabled
         if debug_mode:
             hint_text = "DEBUG: Press SPACE to continue, 'q' to quit"
             hint_y = legend_y + len(legend_texts) * 22 + 15
-            (hint_w, hint_h), hint_baseline = cv2.getTextSize(
-                hint_text, cv2.FONT_HERSHEY_SIMPLEX, 0.7, 2
-            )
+            (hint_w, hint_h), hint_baseline = cv2.getTextSize(hint_text, cv2.FONT_HERSHEY_SIMPLEX, 0.7, 2)
             cv2.rectangle(display_img, (5, hint_y - hint_h - 5), 
                          (hint_w + 15, hint_y + hint_baseline + 5), (0, 0, 128), -1)
-            cv2.putText(
-                display_img,
-                hint_text,
-                (10, hint_y),
-                cv2.FONT_HERSHEY_SIMPLEX,
-                0.7,
-                (255, 255, 0),
-                2,
-                cv2.LINE_AA
-            )
+            cv2.putText(display_img, hint_text, (10, hint_y), cv2.FONT_HERSHEY_SIMPLEX,
+                       0.7, (255, 255, 0), 2, cv2.LINE_AA)
 
         cv2.imshow(window_name, display_img)
 
@@ -265,25 +164,13 @@ class VoronoiGenerator:
         window_name: str = "Voronoi Dilation Progress",
     ) -> np.ndarray:
         """
-        Dilate labeled regions to fill entire district using morphological dilation.
-
-        Args:
-            labeled_array: Array with initial labels (0 = unlabeled)
-            district_mask: Binary mask defining valid area (1 = inside district)
-            max_iterations: Maximum number of dilation iterations
-            visualize: Whether to visualize the dilation process with OpenCV
-            viz_interval: Show visualization every N iterations (default: 1)
-            debug_mode: If True, wait for SPACE key press to continue each step
-            buildings_mask: Binary mask of original buildings to overlay in white
-            window_name: Name for the OpenCV visualization window
-
-        Returns:
-            Filled labeled array
+        Dilate labeled regions using 8-connectivity until district is filled.
+        
+        Returns labeled array with all district pixels assigned to nearest building.
         """
         result = labeled_array.copy()
-        structure = ndimage.generate_binary_structure(2, 2)  # 8-connectivity
+        structure = ndimage.generate_binary_structure(2, 2)
 
-        # Setup visualization if enabled
         color_map = None
         if visualize:
             num_labels = len(np.unique(result[result > 0]))
@@ -291,44 +178,35 @@ class VoronoiGenerator:
             cv2.namedWindow(window_name, cv2.WINDOW_NORMAL)
 
             if debug_mode:
-                logger.info("DEBUG MODE: Press SPACE to step through iterations, 'q' to quit")
+                logger.debug("Visualization: DEBUG mode (press SPACE to step)")
             else:
-                logger.info("Visualization enabled. Press 'q' to quit, 'p' to pause/resume")
+                logger.debug("Visualization: press 'q' to quit, 'p' to pause")
 
         paused = False
 
         for iteration in range(max_iterations):
-            # Find unlabeled pixels within district
             unlabeled_mask = (result == 0) & (district_mask == 1)
 
             if not unlabeled_mask.any():
-                logger.debug("All pixels labeled after %d iterations", iteration)
                 if visualize:
                     self._visualize_labels(
                         result, color_map, district_mask, iteration, 
                         buildings_mask=buildings_mask, debug_mode=debug_mode, 
                         window_name=window_name
                     )
-                    cv2.waitKey(2000)  # Show final result for 2 seconds
+                    cv2.waitKey(2000)
                 break
 
-            # Dilate each label
             changed = False
             for label in np.unique(result[result > 0]):
-                # Create mask for this label
                 label_mask = (result == label)
-
-                # Dilate by one pixel
                 dilated = ndimage.binary_dilation(label_mask, structure=structure)
-
-                # Only assign to unlabeled pixels within district
                 new_pixels = dilated & unlabeled_mask
 
                 if new_pixels.any():
                     result[new_pixels] = label
                     changed = True
 
-            # Visualize progress
             if visualize and (iteration % viz_interval == 0 or not changed):
                 self._visualize_labels(
                     result, color_map, district_mask, iteration,
@@ -336,61 +214,48 @@ class VoronoiGenerator:
                     window_name=window_name
                 )
 
-                # Handle keyboard input
                 if debug_mode:
-                    # In debug mode, wait for SPACE key to continue
                     while True:
                         key = cv2.waitKey(0) & 0xFF
-
-                        if key == ord('q'):  # Quit
-                            logger.info("Visualization interrupted by user")
+                        if key == ord('q'):
+                            logger.debug("Visualization interrupted")
                             cv2.destroyWindow(window_name)
                             return result
-                        elif key == ord(' '):  # Space - continue to next iteration
+                        elif key == ord(' '):
                             break
                 else:
-                    # Normal mode with pause/resume
                     while True:
                         key = cv2.waitKey(1 if not paused else 0) & 0xFF
-
-                        if key == ord('q'):  # Quit
-                            logger.info("Visualization interrupted by user")
+                        if key == ord('q'):
+                            logger.debug("Visualization interrupted")
                             cv2.destroyWindow(window_name)
                             return result
-                        elif key == ord('p'):  # Pause/Resume
+                        elif key == ord('p'):
                             paused = not paused
-                            logger.info("Visualization %s", "paused" if paused else "resumed")
-                        elif not paused:  # Continue if not paused
+                        elif not paused:
                             break
 
             if not changed:
-                logger.debug("No changes after %d iterations", iteration)
                 break
 
-        # Check if there are still unlabeled pixels
         remaining = ((result == 0) & (district_mask == 1)).sum()
         if remaining > 0:
-            logger.warning("Still have %d unlabeled pixels after dilation", remaining)
+            logger.warning("%d pixels remain unlabeled after %d iterations", remaining, max_iterations)
 
-            # Show final result (including unlabeled pixels)
             if visualize:
-                logger.info("Showing final result with %d unlabeled pixels (red color)", remaining)
                 self._visualize_labels(
                     result, color_map, district_mask, max_iterations,
                     buildings_mask=buildings_mask, debug_mode=debug_mode,
                     window_name=window_name
                 )
-                # Wait for user review or auto-wait
                 if debug_mode:
-                    logger.info("Press SPACE to continue or 'q' to quit")
                     while True:
                         key = cv2.waitKey(0) & 0xFF
                         if key == ord(' ') or key == ord('q'):
                             break
                 else:
-                    cv2.waitKey(3000)  # Wait 3 seconds
+                    cv2.waitKey(3000)
 
-        # Cleanup visualization
         if visualize:
             cv2.destroyWindow(window_name)
 
@@ -402,49 +267,24 @@ class VoronoiGenerator:
         district_mask: np.ndarray,
         original_buildings_mask: np.ndarray,
     ) -> np.ndarray:
-        """
-        Extract centerline boundaries between different Voronoi regions.
-
-        Uses morphological gradient to detect region changes, then applies
-        thinning to get single-pixel centerlines.
-
-        Args:
-            voronoi: Labeled Voronoi partition array
-            district_mask: Binary mask (1 inside district, 0 outside)
-            original_buildings_mask: Binary mask of original buildings (to exclude from boundaries)
-
-        Returns:
-            Binary boundary array (1 = boundary centerline, 0 = not boundary)
-        """
-        logger.debug("Extracting Voronoi boundary centerlines")
-
-        # Use morphological gradient to detect boundaries
-        # This gives us a thick boundary between regions
+        """Extract centerline boundaries between Voronoi regions using skeletonization."""
         from scipy.ndimage import grey_dilation, grey_erosion
+        from skimage.morphology import skeletonize
 
-        # Apply morphological gradient (dilation - erosion)
-        # This highlights edges between different labels
         dilated = grey_dilation(voronoi, size=(3, 3))
         eroded = grey_erosion(voronoi, size=(3, 3))
 
-        # Boundary exists where dilation != erosion
         boundaries_thick = (dilated != eroded).astype(np.uint8)
 
-        # Only keep boundaries inside district and outside buildings
         valid_mask = (district_mask == 1) & (original_buildings_mask == 0)
         boundaries_thick = boundaries_thick & valid_mask
 
-        # Thin boundaries to single-pixel width using skeletonization
-        from skimage.morphology import skeletonize
-
-        # Apply skeletonization to get centerlines
         if boundaries_thick.any():
             boundaries = skeletonize(boundaries_thick).astype(np.uint8)
         else:
             boundaries = boundaries_thick
 
-        num_boundary_pixels = boundaries.sum()
-        logger.info("Extracted %d boundary centerline pixels", num_boundary_pixels)
+        logger.debug("Extracted %d boundary pixels", boundaries.sum())
 
         return boundaries
 
@@ -455,42 +295,18 @@ class VoronoiGenerator:
         crs: str = "EPSG:32650",
         district_attrs: Optional[dict] = None,
     ) -> gpd.GeoDataFrame:
-        """
-        Convert Voronoi partition raster to vector polygon features.
-
-        Uses rasterio.features.shapes to extract polygon geometries for each
-        unique Voronoi region (building).
-
-        Args:
-            voronoi: Labeled Voronoi partition array (0 = outside, -999 = NoData/unclassified)
-            transform: Affine transformation from raster to world coordinates
-            crs: Coordinate reference system
-            district_attrs: Optional district attributes to add to features
-
-        Returns:
-            GeoDataFrame with Voronoi polygons, each labeled with building_id
-        """
-        logger.debug("Vectorizing Voronoi partition to polygon features")
-
-        # Get unique building IDs (excluding 0 = outside, -999 = NoData/unclassified)
+        """Convert Voronoi partition raster to vector polygons."""
         unique_ids = np.unique(voronoi[voronoi > 0])
         num_regions = len(unique_ids)
 
         if num_regions == 0:
-            logger.warning("No Voronoi regions to vectorize")
+            logger.warning("No regions to vectorize")
             return gpd.GeoDataFrame(columns=['geometry', 'building_id', 'area'], crs=crs)
 
-        logger.info("Vectorizing %d Voronoi regions", num_regions)
-
-        # Extract polygon shapes from raster
         polygons = []
         building_ids = []
 
-        for geom, value in features.shapes(
-            voronoi.astype(np.int32),
-            transform=transform
-        ):
-            # Skip background (value <= 0) and NoData (value == -999)
+        for geom, value in features.shapes(voronoi.astype(np.int32), transform=transform):
             if value > 0:
                 poly = Polygon(geom['coordinates'][0])
                 if poly.is_valid and not poly.is_empty:
@@ -498,28 +314,22 @@ class VoronoiGenerator:
                     building_ids.append(int(value))
 
         if not polygons:
-            logger.warning("No valid polygons extracted after vectorization")
+            logger.warning("No valid polygons extracted")
             return gpd.GeoDataFrame(columns=['geometry', 'building_id', 'area'], crs=crs)
 
-        logger.info("Extracted %d polygon features", len(polygons))
-
-        # Create GeoDataFrame
         gdf = gpd.GeoDataFrame({
             'geometry': polygons,
             'building_id': building_ids
         }, crs=crs)
 
-        # Calculate area
         gdf['area'] = gdf.geometry.area
 
-        # Add district attributes if provided
         if district_attrs:
             for key, value in district_attrs.items():
                 if key not in gdf.columns:
                     gdf[key] = value
 
-        logger.info("Created GeoDataFrame with %d polygon features, total area: %.2f m²",
-                   len(gdf), gdf['area'].sum())
+        logger.debug("Vectorized %d polygons (%.2f m²)", len(gdf), gdf['area'].sum())
 
         return gdf
 
@@ -530,25 +340,9 @@ class VoronoiGenerator:
         crs: str = "EPSG:32650",
         district_attrs: Optional[dict] = None,
     ) -> gpd.GeoDataFrame:
-        """
-        Convert boundary skeleton raster to vector line features.
-
-        Uses a pixel-tracing approach to extract continuous line segments
-        from the skeletonized boundary raster.
-
-        Args:
-            boundaries: Binary boundary skeleton array (1 = boundary)
-            transform: Affine transformation from raster to world coordinates
-            crs: Coordinate reference system
-            district_attrs: Optional district attributes to add to features
-
-        Returns:
-            GeoDataFrame with boundary lines
-        """
-        logger.debug("Vectorizing boundary skeleton to line features")
-
+        """Convert boundary skeleton raster to vector line features using pixel tracing."""
         if not boundaries.any():
-            logger.warning("No boundary pixels to vectorize")
+            logger.warning("No boundaries to vectorize")
             return gpd.GeoDataFrame(columns=['geometry', 'length'], crs=crs)
 
         lines = []
@@ -590,25 +384,17 @@ class VoronoiGenerator:
 
             return path
 
-        # Find all boundary pixels
         boundary_pixels = np.argwhere(boundaries == 1)
 
-        logger.debug("Found %d boundary pixels to trace", len(boundary_pixels))
-
-        # Trace lines from unvisited boundary pixels
         for row, col in boundary_pixels:
             if not visited[row, col]:
                 path = trace_line(row, col)
 
-                if len(path) >= 2:  # Need at least 2 points for a line
-                    # Convert pixel path to world coordinates
+                if len(path) >= 2:
                     coords = [pixel_to_coords(r, c) for r, c in path]
-
-                    # Create LineString
                     line = LineString(coords)
 
                     if line.is_valid and line.length > 0:
-                        # Simplify line
                         line_simplified = line.simplify(
                             self.simplify_tolerance,
                             preserve_topology=True
@@ -617,33 +403,24 @@ class VoronoiGenerator:
                             lines.append(line_simplified)
 
         if not lines:
-            logger.warning("No boundary lines extracted after tracing")
+            logger.warning("No lines extracted")
             return gpd.GeoDataFrame(columns=['geometry', 'length'], crs=crs)
 
-        logger.info("Traced %d boundary line segments", len(lines))
-
-        # Try to merge connected lines
         merged = linemerge(lines)
         if merged.geom_type == 'LineString':
             lines = [merged]
         elif merged.geom_type == 'MultiLineString':
             lines = list(merged.geoms)
-        logger.debug("Merged into %d line features", len(lines))
 
-        # Create GeoDataFrame
         gdf = gpd.GeoDataFrame({'geometry': lines}, crs=crs)
-
-        # Calculate length
         gdf['length'] = gdf.geometry.length
 
-        # Add district attributes if provided
         if district_attrs:
             for key, value in district_attrs.items():
                 if key not in gdf.columns:
                     gdf[key] = value
 
-        logger.info("Created GeoDataFrame with %d boundary features, total length: %.2f m",
-                   len(gdf), gdf['length'].sum())
+        logger.debug("Traced %d lines (%.2f m total)", len(gdf), gdf['length'].sum())
 
         return gdf
 
@@ -659,28 +436,15 @@ class VoronoiGenerator:
         debug_mode: bool = False,
     ) -> Tuple[gpd.GeoDataFrame, np.ndarray]:
         """
-        Complete workflow: generate Voronoi diagram and extract polygon features.
-
-        Args:
-            building_raster: 2D array with building IDs > 0
-            district_mask: Binary mask (1 inside district, 0 outside)
-            transform: Affine transformation matrix
-            crs: Coordinate reference system
-            district_attrs: Optional district attributes
-            visualize: Whether to visualize the dilation process with OpenCV
-            viz_interval: Show visualization every N iterations (default: 1)
-            debug_mode: If True, wait for SPACE key press to continue each step
-
-        Returns:
-            Tuple of (voronoi_polygons_gdf, voronoi_partition_array)
+        Generate Voronoi diagram and convert to polygon features.
+        
+        Returns (voronoi_polygons_gdf, voronoi_partition_array).
         """
-        # Generate Voronoi partition
         voronoi, _ = self.generate_voronoi_from_raster(
             building_raster, district_mask, visualize=visualize, 
             viz_interval=viz_interval, debug_mode=debug_mode
         )
 
-        # Vectorize Voronoi regions as polygons
         voronoi_gdf = self.vectorize_voronoi_polygons(
             voronoi, transform, crs, district_attrs
         )
@@ -699,33 +463,17 @@ class VoronoiGenerator:
         debug_mode: bool = False,
     ) -> Tuple[gpd.GeoDataFrame, np.ndarray]:
         """
-        Complete workflow: generate Voronoi diagram and extract boundaries.
-
-        DEPRECATED: Use generate_voronoi_polygons instead for polygon output.
-
-        Args:
-            building_raster: 2D array with building pixels > 0
-            district_mask: Binary mask (1 inside district, 0 outside)
-            transform: Affine transformation matrix
-            crs: Coordinate reference system
-            district_attrs: Optional district attributes
-            visualize: Whether to visualize the dilation process with OpenCV
-            viz_interval: Show visualization every N iterations (default: 1)
-            debug_mode: If True, wait for SPACE key press to continue each step
-
-        Returns:
-            Tuple of (boundary_lines_gdf, voronoi_partition_array)
+        Generate Voronoi diagram and extract boundary lines.
+        
+        DEPRECATED: Use generate_voronoi_polygons for polygon output.
         """
-        # Generate Voronoi partition
         voronoi, original_buildings_mask = self.generate_voronoi_from_raster(
             building_raster, district_mask, visualize=visualize, 
             viz_interval=viz_interval, debug_mode=debug_mode
         )
 
-        # Extract boundaries (centerlines between regions, excluding buildings)
         boundaries = self.extract_boundaries(voronoi, district_mask, original_buildings_mask)
 
-        # Vectorize boundaries
         boundary_gdf = self.vectorize_boundaries(
             boundaries, transform, crs, district_attrs
         )

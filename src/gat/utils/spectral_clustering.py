@@ -65,7 +65,8 @@ def compute_affinity_matrix(
     embedding_weight: float = 0.3,
     feature_weight: float = 0.5,
     distance_weight: float = 0.2,
-    distance_scale: float = 1.0
+    distance_scale: float = 1.0,
+    max_hops: int = 3
 ) -> np.ndarray:
     """
     Compute affinity matrix for spectral clustering by combining multiple similarity measures.
@@ -88,6 +89,7 @@ def compute_affinity_matrix(
         feature_weight: Weight for feature similarity (default 0.5)
         distance_weight: Weight for distance-based adjacency (default 0.2)
         distance_scale: Scale factor for distance-to-affinity conversion in meters (default 1.0)
+        max_hops: Maximum graph hops for clustering (default 3)
 
     Returns:
         affinity_matrix: Combined affinity matrix (N, N), normalized to [0, 1]
@@ -190,7 +192,155 @@ def compute_affinity_matrix(
     logger.debug("Final affinity matrix: min=%.4f, max=%.4f, mean=%.4f", 
                  affinity.min(), affinity.max(), affinity.mean())
 
+    # Apply hop constraint to prevent distant buildings from clustering
+    if max_hops is not None and max_hops > 0:
+        affinity = apply_hop_constraint(affinity, adjacency_matrix, max_hops)
+
     return affinity
+
+
+def apply_hop_constraint(
+    affinity_matrix: np.ndarray,
+    adjacency_matrix: pd.DataFrame,
+    max_hops: int = 3
+) -> np.ndarray:
+    """
+    Apply maximum hop constraint to affinity matrix.
+
+    Limits clustering propagation by zeroing out affinities between nodes
+    that are more than max_hops apart in the graph topology.
+
+    Args:
+        affinity_matrix: Computed affinity matrix (N, N)
+        adjacency_matrix: Original adjacency matrix (N, N) 
+        max_hops: Maximum number of hops allowed (default 3)
+
+    Returns:
+        constrained_affinity: Affinity matrix with hop constraint applied (N, N)
+    """
+    from scipy.sparse import csr_matrix
+    from scipy.sparse.csgraph import shortest_path
+
+    logger.debug(f"Applying {max_hops}-hop constraint to affinity matrix")
+
+    # Create binary adjacency for hop distance calculation
+    adjacency_binary = (adjacency_matrix.values > 0).astype(float)
+    sparse_adj = csr_matrix(adjacency_binary)
+
+    # Compute shortest path distances (in hops)
+    hop_distances = shortest_path(
+        sparse_adj, 
+        directed=False, 
+        return_predecessors=False,
+        unweighted=True
+    )
+
+    # Create hop mask: True for nodes within max_hops
+    hop_mask = (hop_distances <= max_hops) & np.isfinite(hop_distances)
+    np.fill_diagonal(hop_mask, True)
+
+    # Apply constraint
+    constrained_affinity = affinity_matrix * hop_mask
+
+    num_original = (affinity_matrix > 0).sum()
+    num_constrained = (constrained_affinity > 0).sum()
+
+    logger.info(
+        f"Hop constraint applied: reduced non-zero entries from {num_original} to {num_constrained} "
+        f"({100.0 * num_constrained / num_original:.1f}%)"
+    )
+
+    return constrained_affinity
+
+
+def filter_small_clusters(
+    cluster_assignments: np.ndarray,
+    cluster_to_label: dict,
+    gat_labels: np.ndarray,
+    min_cluster_size: int = 5
+) -> Tuple[dict, np.ndarray, dict]:
+    """
+    Filter out clusters smaller than threshold and revert to GAT predictions.
+
+    For clusters with size < min_cluster_size:
+    - Do not use cluster majority voting result
+    - Revert buildings to original GAT predicted labels
+    - Mark these buildings as "unclustered"
+
+    Args:
+        cluster_assignments: Original cluster assignments (N,)
+        cluster_to_label: Cluster ID to label mapping (dict)
+        gat_labels: Original GAT predicted labels (N,)
+        min_cluster_size: Minimum cluster size threshold (default 5)
+
+    Returns:
+        filtered_cluster_to_label: Filtered cluster to label mapping (only valid clusters)
+        final_labels: Final labels with small clusters reverted to GAT predictions (N,)
+        cluster_stats: Statistics about filtering operation (dict)
+    """
+    logger.debug(f"Filtering clusters with size < {min_cluster_size}")
+
+    # Count cluster sizes
+    unique_clusters, cluster_sizes = np.unique(cluster_assignments, return_counts=True)
+    cluster_size_dict = dict(zip(unique_clusters, cluster_sizes))
+
+    # Identify small and valid clusters
+    small_clusters = []
+    valid_clusters = []
+
+    for cluster_id, size in cluster_size_dict.items():
+        if size < min_cluster_size:
+            small_clusters.append(cluster_id)
+        else:
+            valid_clusters.append(cluster_id)
+
+    logger.info(
+        f"Cluster filtering: {len(small_clusters)} small clusters (< {min_cluster_size}), "
+        f"{len(valid_clusters)} valid clusters"
+    )
+
+    # Filter cluster_to_label (keep only valid clusters)
+    filtered_cluster_to_label = {
+        cid: cluster_to_label[cid] 
+        for cid in valid_clusters
+    }
+
+    # Build final labels array
+    final_labels = np.zeros_like(gat_labels)
+    revert_count = 0
+
+    for i in range(len(cluster_assignments)):
+        cluster_id = cluster_assignments[i]
+
+        if cluster_id in small_clusters:
+            # Small cluster: revert to GAT prediction
+            final_labels[i] = gat_labels[i]
+            revert_count += 1
+        else:
+            # Valid cluster: use majority voting result
+            final_labels[i] = cluster_to_label[cluster_id]
+
+    logger.info(f"Reverted {revert_count} buildings from small clusters to GAT predictions")
+
+    # Build statistics
+    cluster_stats = {
+        'total_clusters': len(unique_clusters),
+        'valid_clusters': len(valid_clusters),
+        'small_clusters': len(small_clusters),
+        'small_cluster_ids': small_clusters,
+        'buildings_reverted': revert_count,
+        'cluster_sizes': cluster_size_dict
+    }
+
+    # Detailed logging for small clusters
+    if small_clusters:
+        logger.debug("Small clusters detail:")
+        for cid in small_clusters:
+            size = cluster_size_dict[cid]
+            original_label = cluster_to_label.get(cid, 'N/A')
+            logger.debug(f"  Cluster {cid}: size={size}, original_label={original_label}")
+
+    return filtered_cluster_to_label, final_labels, cluster_stats
 
 
 def spectral_cluster(
@@ -419,8 +569,10 @@ def perform_spectral_clustering_pipeline(
     feature_weight: float = 0.5,
     distance_weight: float = 0.2,
     distance_scale: float = 1.0,
+    min_cluster_size: int = 5,
+    max_hops: int = 3,
     random_state: int = 42
-) -> Tuple[np.ndarray, np.ndarray, dict, np.ndarray]:
+) -> Tuple[np.ndarray, np.ndarray, dict, np.ndarray, dict]:
     """
     Complete spectral clustering pipeline for spatial smoothing of GAT predictions.
 
@@ -428,6 +580,7 @@ def perform_spectral_clustering_pipeline(
     1. Compute affinity matrix combining embeddings, morphological features, and spatial distance
     2. Perform spectral clustering to group spatially similar buildings
     3. Assign GAT labels to clusters using (optionally confidence-weighted) majority voting
+    4. Filter small clusters and revert to GAT predictions
 
     The key innovation is the confidence-weighted voting: GAT predictions with high
     confidence have more influence, preventing uncertain predictions from dominating.
@@ -446,16 +599,23 @@ def perform_spectral_clustering_pipeline(
         feature_weight: Weight for morphological feature similarity (default 0.5)
         distance_weight: Weight for distance-based adjacency (default 0.2)
         distance_scale: Scale factor for distance-to-affinity conversion in meters (default 1.0)
+        min_cluster_size: Minimum buildings per cluster; smaller reverted to GAT (default 5)
+        max_hops: Maximum graph hops for clustering (default 3)
         random_state: Random seed for reproducibility
 
     Returns:
         cluster_assignments: Final cluster assignments (N,)
-        final_labels: Final labels after assigning GAT labels (N,)
-        cluster_to_label: Mapping from cluster ID to GAT label (dict)
+        final_labels: Final labels after filtering small clusters (N,)
+        cluster_to_label: Mapping from cluster ID to label (only valid clusters)
         affinity_matrix: Computed affinity matrix (N, N)
+        cluster_stats: Statistics about cluster filtering (dict)
     """
-    logger.info("Starting spectral clustering pipeline (weights: emb=%.2f, feat=%.2f, dist=%.2f, conf_weighted=%s)",
-                embedding_weight, feature_weight, distance_weight, use_confidence_weighted_voting)
+    logger.info(
+        "Starting spectral clustering pipeline "
+        "(weights: emb=%.2f, feat=%.2f, dist=%.2f, conf_weighted=%s, min_size=%d, max_hops=%d)",
+        embedding_weight, feature_weight, distance_weight, 
+        use_confidence_weighted_voting, min_cluster_size, max_hops
+    )
 
     # Step 1: Compute affinity matrix combining embeddings, features, and spatial distance
     affinity_matrix = compute_affinity_matrix(
@@ -465,7 +625,8 @@ def perform_spectral_clustering_pipeline(
         embedding_weight=embedding_weight,
         feature_weight=feature_weight,
         distance_weight=distance_weight,
-        distance_scale=distance_scale
+        distance_scale=distance_scale,
+        max_hops=max_hops
     )
 
     # Step 2: Estimate optimal number of clusters if not provided (with 1.5x oversampling)
@@ -499,8 +660,21 @@ def perform_spectral_clustering_pipeline(
             gat_labels=gat_labels
         )
 
-    logger.info("Spectral clustering pipeline completed successfully: %d final clusters",
-                len(np.unique(cluster_assignments)))
+    # Step 5: Filter small clusters and revert to GAT predictions
+    filtered_cluster_to_label, final_labels, cluster_stats = filter_small_clusters(
+        cluster_assignments=cluster_assignments,
+        cluster_to_label=cluster_to_label,
+        gat_labels=gat_labels,
+        min_cluster_size=min_cluster_size
+    )
 
-    return cluster_assignments, final_labels, cluster_to_label, affinity_matrix
+    logger.info(
+        "Spectral clustering completed: %d total clusters, %d valid (size >= %d), %d buildings reverted",
+        cluster_stats['total_clusters'],
+        cluster_stats['valid_clusters'],
+        min_cluster_size,
+        cluster_stats['buildings_reverted']
+    )
+
+    return cluster_assignments, final_labels, filtered_cluster_to_label, affinity_matrix, cluster_stats
 

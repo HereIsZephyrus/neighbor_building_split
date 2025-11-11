@@ -1,4 +1,4 @@
-"""Chunk splitter for large district processing."""
+"""District spatial partitioning for parallel processing."""
 
 from typing import List, Tuple
 import numpy as np
@@ -58,64 +58,54 @@ def split_district_adaptive(
     resolution: float = 1.0
 ) -> List[Tuple[Polygon, gpd.GeoDataFrame]]:
     """
-    Split district into chunks based on building spatial distribution.
-
-    Uses k-means clustering on building centroids to create spatially
-    balanced chunks with roughly equal building counts.
+    Partition district into balanced chunks using k-means clustering.
 
     Args:
-        district_geom: Shapely geometry of the district
-        buildings_gdf: GeoDataFrame with building polygons
-        num_chunks: Number of chunks to create (default: 4)
+        district_geom: District boundary geometry
+        buildings_gdf: Building polygons
+        num_chunks: Target number of chunks
         overlap: Overlap between chunks in pixels
-        resolution: Pixel size in meters (for converting overlap)
+        resolution: Pixel size in meters
 
     Returns:
-        List of tuples (chunk_geometry, buildings_in_chunk)
+        List of (chunk_geometry, buildings_in_chunk) tuples
     """
-    logger.info("Splitting district into %d adaptive chunks (overlap: %d pixels = %.1f m)",
-                num_chunks, overlap, overlap * resolution)
+    logger.info("Splitting district into %d chunks with %d-pixel overlap",
+                num_chunks, overlap)
 
     if len(buildings_gdf) == 0:
-        logger.warning("No buildings found, returning single chunk")
+        logger.warning("No buildings, returning single chunk")
         return [(district_geom, buildings_gdf)]
 
-    # Extract building centroids
     centroids = np.array([[geom.centroid.x, geom.centroid.y] for geom in buildings_gdf.geometry])
 
-    # Use k-means clustering to group buildings
     if len(buildings_gdf) < num_chunks:
-        logger.warning("Fewer buildings (%d) than chunks (%d), using %d chunks",
-                      len(buildings_gdf), num_chunks, len(buildings_gdf))
+        logger.warning("Adjusting chunks from %d to %d (building count)",
+                      num_chunks, len(buildings_gdf))
         num_chunks = len(buildings_gdf)
 
     kmeans = KMeans(n_clusters=num_chunks, random_state=42, n_init=10)
     cluster_labels = kmeans.fit_predict(centroids)
 
-    # Create chunks based on clusters
     chunks = []
     overlap_meters = overlap * resolution
 
     for cluster_id in range(num_chunks):
-        # Get buildings in this cluster
         cluster_mask = cluster_labels == cluster_id
         cluster_buildings = buildings_gdf[cluster_mask].copy()
 
         if len(cluster_buildings) == 0:
-            logger.warning("Cluster %d has no buildings, skipping", cluster_id)
+            logger.warning("Cluster %d empty, skipping", cluster_id)
             continue
 
-        # Create bounding box around cluster buildings with overlap
         cluster_union = unary_union(cluster_buildings.geometry)
         minx, miny, maxx, maxy = cluster_union.bounds
 
-        # Add overlap buffer
         minx -= overlap_meters
         miny -= overlap_meters
         maxx += overlap_meters
         maxy += overlap_meters
 
-        # Clip to district bounds (extended slightly for safety)
         district_minx, district_miny, district_maxx, district_maxy = district_geom.bounds
         minx = max(minx, district_minx - overlap_meters)
         miny = max(miny, district_miny - overlap_meters)
@@ -123,26 +113,22 @@ def split_district_adaptive(
         maxy = min(maxy, district_maxy + overlap_meters)
 
         chunk_box = box(minx, miny, maxx, maxy)
-
-        # Intersect with district geometry to get actual chunk
         chunk_geom = chunk_box.intersection(district_geom)
 
         if chunk_geom.is_empty:
-            logger.warning("Chunk %d geometry is empty after intersection, skipping", cluster_id)
+            logger.warning("Chunk %d empty after clipping, skipping", cluster_id)
             continue
 
-        # Get all buildings that intersect this chunk (including overlap regions)
         chunk_buildings_mask = buildings_gdf.geometry.intersects(chunk_geom)
         chunk_buildings = buildings_gdf[chunk_buildings_mask].copy()
 
-        logger.info("Chunk %d: %d buildings (%.1f%%), bounds: (%.1f, %.1f) to (%.1f, %.1f)",
+        logger.debug("Chunk %d: %d buildings (%.1f%%)",
                    cluster_id, len(chunk_buildings), 
-                   len(chunk_buildings) / len(buildings_gdf) * 100,
-                   minx, miny, maxx, maxy)
+                   len(chunk_buildings) / len(buildings_gdf) * 100)
 
         chunks.append((chunk_geom, chunk_buildings))
 
-    logger.info("Created %d chunks covering %d total buildings",
+    logger.info("Created %d chunks from %d buildings",
                 len(chunks), len(buildings_gdf))
 
     return chunks

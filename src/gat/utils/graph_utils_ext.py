@@ -32,6 +32,10 @@ def extract_subgraph(
     else:
         node_mask_tensor = node_mask
 
+    # Move to the same device as the data
+    if data.x is not None:
+        node_mask_tensor = node_mask_tensor.to(data.x.device)
+
     # Create mapping from old indices to new indices
     old_to_new = {}
     new_idx = 0
@@ -56,10 +60,13 @@ def extract_subgraph(
         if src in old_to_new and dst in old_to_new:
             remapped_edges.append([old_to_new[src], old_to_new[dst]])
 
+    # Get the device from the original data
+    device = data.x.device if data.x is not None else torch.device('cpu')
+
     if remapped_edges:
-        sub_edge_index = torch.tensor(remapped_edges, dtype=torch.long).t().contiguous()
+        sub_edge_index = torch.tensor(remapped_edges, dtype=torch.long, device=device).t().contiguous()
     else:
-        sub_edge_index = torch.empty((2, 0), dtype=torch.long)
+        sub_edge_index = torch.empty((2, 0), dtype=torch.long, device=device)
 
     # Extract edge attributes if present
     sub_edge_attr = None

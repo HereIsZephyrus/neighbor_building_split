@@ -92,26 +92,26 @@ class Rasterizer:
                 break
 
         for idx, building in buildings.iterrows():
-            # 检查几何有效性
+            # Check geometry validity
             if building.geometry is None or building.geometry.is_empty:
                 logger.debug("Skipping building %s: invalid or empty geometry", idx)
                 skipped_invalid += 1
                 continue
 
-            # 获取建筑ID值
+            # Get building ID value
             if id_field is not None:
                 building_id = building.get(id_field)
-                # 处理 NULL/NaN/None 值
+                # Handle NULL/NaN/None values
                 if building_id is None or (isinstance(building_id, float) and math.isnan(building_id)):
-                    # 如果ID为空，使用索引+1（确保>0）
+                    # If ID is empty, use index+1 (ensure >0)
                     building_id = int(idx) + 1 if isinstance(idx, int) else hash(str(idx)) % 2147483647
                     missing_id += 1
                 else:
                     building_id = int(building_id)
             else:
-                # 如果没有ID字段，使用索引+1（确保>0）
+                # If no ID field, use index+1 (ensure >0)
                 building_id = int(idx) + 1 if isinstance(idx, int) else hash(str(idx)) % 2147483647
-                if missing_id == 0:  # 只记录一次警告
+                if missing_id == 0:  # Only log warning once
                     logger.warning("No ID field found in buildings, using index as ID")
                 missing_id += 1
 
@@ -179,7 +179,7 @@ class Rasterizer:
             out_shape=shape,
             transform=transform,
             fill=0,
-            all_touched=True,  # 改为 True，与建筑栅格化一致
+            all_touched=True,  # Changed to True, consistent with building rasterization
             dtype=np.uint8,
         )
 

@@ -102,27 +102,47 @@ def compute_affinity_matrix(
         embedding_weight, feature_weight, distance_weight
     )
 
+    # Get distance matrix first (needed for masking non-adjacent nodes)
+    distance_matrix = adjacency_matrix.values
+
+    # Create adjacency mask (True for adjacent nodes, False for non-adjacent)
+    adjacency_mask = distance_matrix > 0
+    np.fill_diagonal(adjacency_mask, True)  # Self-connections always allowed
+
     # 1. Embedding-based similarity (captures discriminative information from GAT)
     # Using cosine similarity: measures angle between embedding vectors
     embedding_sim = cosine_similarity(embeddings)
     # Normalize from [-1, 1] to [0, 1] range
     embedding_sim = (embedding_sim + 1) / 2
-    logger.debug("Embedding similarity computed: min=%.4f, max=%.4f, mean=%.4f", 
-                 embedding_sim.min(), embedding_sim.max(), embedding_sim.mean())
+
+    # CRITICAL: Restrict embedding similarity to adjacent nodes only
+    # This prevents distant buildings from clustering based on embedding similarity alone
+    embedding_sim[~adjacency_mask] = 0
+
+    logger.debug("Embedding similarity computed: min=%.4f, max=%.4f, mean=%.4f (non-zero)", 
+                 embedding_sim[embedding_sim > 0].min() if embedding_sim[embedding_sim > 0].size > 0 else 0,
+                 embedding_sim.max(), 
+                 embedding_sim[embedding_sim > 0].mean() if embedding_sim[embedding_sim > 0].size > 0 else 0)
 
     # 2. Feature-based similarity (captures morphological similarity for grouping)
     # Using cosine similarity on morphological features (area, shape, orientation, etc.)
     feature_sim = cosine_similarity(features)
     # Normalize from [-1, 1] to [0, 1] range
     feature_sim = (feature_sim + 1) / 2
-    logger.debug("Feature similarity computed: min=%.4f, max=%.4f, mean=%.4f", 
-                 feature_sim.min(), feature_sim.max(), feature_sim.mean())
+
+    # CRITICAL: Restrict feature similarity to adjacent nodes only
+    # This prevents distant buildings from clustering based on morphological similarity alone
+    feature_sim[~adjacency_mask] = 0
+
+    logger.debug("Feature similarity computed: min=%.4f, max=%.4f, mean=%.4f (non-zero)", 
+                 feature_sim[feature_sim > 0].min() if feature_sim[feature_sim > 0].size > 0 else 0,
+                 feature_sim.max(), 
+                 feature_sim[feature_sim > 0].mean() if feature_sim[feature_sim > 0].size > 0 else 0)
 
     # 3. Distance-based affinity (enforces spatial proximity constraint)
     # Adjacency matrix contains distances between buildings (meters)
     # Convert distance to affinity using exponential decay: affinity = exp(-distance / scale)
     # Closer buildings have higher affinity, distant buildings have lower affinity
-    distance_matrix = adjacency_matrix.values
 
     # Apply exponential decay to convert distances to affinities
     # distance_scale controls how quickly affinity decays with distance

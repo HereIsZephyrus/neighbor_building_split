@@ -7,6 +7,7 @@ gat_features:
   - height      # Building height (meters)
   - albedo      # Surface albedo (reflectivity)
   - hwratio     # Height-to-width ratio
+  - area
   # Note: 'degree' (number of neighbors) and 'neighdis' (average neighbor distance) are added automatically during graph construction
 
 # Clustering Features (used during spectral clustering for spatial grouping)
@@ -33,7 +34,7 @@ feature_descriptions:
   hwratio: "Height-to-width ratio - GAT only (discriminative)"
   degree: "Number of neighboring buildings - GAT only, added dynamically during graph construction"
   neighdis: "Average distance to neighboring buildings - GAT only, added dynamically during graph construction"
-  area: "Building footprint area - clustering only (morphological)"
+  area: "Building footprint area - used in both GAT and clustering"
   perimeter: "Building perimeter - clustering only (morphological)"
   orientatio: "Main axis orientation - clustering only (morphological)"
   elongation: "Elongation measure - clustering only (morphological)"

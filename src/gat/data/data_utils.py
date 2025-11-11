@@ -80,8 +80,14 @@ def load_district_graph(
     # Extract GAT features (now includes neighdis placeholder)
     features = extract_gat_features(buildings_gdf)
 
+    # Calculate node degree (number of neighbors) for each building
+    degrees = []
+    for i in range(len(sim_matrix)):
+        row = sim_matrix.iloc[i]
+        num_neighbors = (row > 0).sum()  # Count non-zero entries
+        degrees.append(num_neighbors)
+
     # Calculate average distance to neighbors from adjacency matrix
-    # Replace the neighdis column (4th column, index 3) with computed values
     avg_neighbor_distances = []
     for i in range(len(sim_matrix)):
         # Get non-zero distances for this building (its neighbors)
@@ -95,9 +101,13 @@ def load_district_graph(
 
         avg_neighbor_distances.append(avg_dist)
 
-    # Replace the neighdis column (assuming it's the 4th feature)
-    features[:, 3] = np.array(avg_neighbor_distances)
-    logger.debug(f"Computed average neighbor distances (neighdis): min={min(avg_neighbor_distances):.2f}, "
+    # Append degree and neighdis as additional features
+    degree_column = np.array(degrees).reshape(-1, 1)
+    neighdis_column = np.array(avg_neighbor_distances).reshape(-1, 1)
+    features = np.concatenate([features, degree_column, neighdis_column], axis=1)
+
+    logger.debug(f"Added degree feature: min={min(degrees)}, max={max(degrees)}, mean={np.mean(degrees):.2f}")
+    logger.debug(f"Added neighdis feature: min={min(avg_neighbor_distances):.2f}, "
                 f"max={max(avg_neighbor_distances):.2f}, mean={np.mean(avg_neighbor_distances):.2f}")
 
     # Normalize features
@@ -212,6 +222,78 @@ def kfold_split(
         val_data = [data_list[i] for i in val_indices]
 
         logger.info(f"Fold {fold_idx + 1}/{n_splits}: {len(train_data)} train, {len(val_data)} val")
+
+        yield train_data, val_data
+
+
+def overlapping_cv_split(
+    data_list: List[Data],
+    n_splits: int = 5,
+    val_ratio: float = 0.3,
+    overlap_ratio: float = 0.15,
+    random_seed: int = 42
+) -> Iterator[Tuple[List[Data], List[Data]]]:
+    """
+    Create overlapping cross-validation splits (rolling window style).
+
+    Compared to standard k-fold, this method:
+    - Validation set has fixed size (e.g., 30%), rather than 1/k
+    - Each fold overlaps with adjacent folds, increasing data utilization
+    - Reduces fluctuation caused by too-small validation sets
+
+    Args:
+        data_list: List of PyG Data objects
+        n_splits: Number of splits (folds)
+        val_ratio: Validation set ratio (recommended 0.2-0.3)
+        overlap_ratio: Overlap ratio between adjacent folds (recommended 0.1-0.2)
+        random_seed: Random seed
+
+    Yields:
+        train_data: Training data list for this fold
+        val_data: Validation data list for this fold
+
+    Example:
+        100 samples, n_splits=5, val_ratio=0.3, overlap_ratio=0.15
+        - Fold 1: val[0:30],   train[30:100]  (70 training)
+        - Fold 2: val[17:47],  train[47:100]+[0:17]  (70 training, 13 overlap)
+        - Fold 3: val[34:64],  train[64:100]+[0:34]  (70 training, 13 overlap)
+        - Fold 4: val[51:81],  train[81:100]+[0:51]  (70 training, 13 overlap)
+        - Fold 5: val[68:98],  train[98:100]+[0:68]  (70 training, 13 overlap)
+    """
+    np.random.seed(random_seed)
+    indices = np.arange(len(data_list))
+    np.random.shuffle(indices)  # Shuffle order
+
+    n = len(data_list)
+    val_size = int(n * val_ratio)
+    step_size = int(val_size * (1 - overlap_ratio))  # Step size for each move (considering overlap)
+
+    logger.info(f"Overlapping CV: {n} samples, {n_splits} folds, val set {val_ratio*100:.1f}%, overlap {overlap_ratio*100:.1f}%")
+    logger.info(f"Per fold: val set ~{val_size}, train set ~{n-val_size}, step size {step_size}")
+
+    for fold_idx in range(n_splits):
+        # Calculate validation set starting position for this fold (circular)
+        val_start = (fold_idx * step_size) % n
+        val_end = (val_start + val_size) % n
+
+        # Handle circular boundary cases
+        if val_end > val_start:
+            # Normal case: val_indices are contiguous
+            val_indices = indices[val_start:val_end]
+            train_indices = np.concatenate([indices[:val_start], indices[val_end:]])
+        else:
+            # Cross boundary: val_indices split into two parts
+            val_indices = np.concatenate([indices[val_start:], indices[:val_end]])
+            train_indices = indices[val_end:val_start]
+
+        train_data = [data_list[i] for i in train_indices]
+        val_data = [data_list[i] for i in val_indices]
+
+        logger.info(
+            f"Fold {fold_idx + 1}/{n_splits}: "
+            f"{len(train_data)} train samples, {len(val_data)} val samples "
+            f"(val range: [{val_start}:{val_end}]{'cross-boundary' if val_end <= val_start else ''})"
+        )
 
         yield train_data, val_data
 

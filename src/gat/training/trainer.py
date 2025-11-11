@@ -269,8 +269,10 @@ class Trainer:
                     )
 
                     # Spatial smoothness loss on all nodes in batch
-                    # Extract edge attributes if available
-                    edge_attr = batch.edge_attr if hasattr(batch, 'edge_attr') else None
+                    # Extract edge attributes if available and ensure it's on the correct device
+                    edge_attr = None
+                    if hasattr(batch, 'edge_attr') and batch.edge_attr is not None:
+                        edge_attr = batch.edge_attr.to(self.device)
                     loss_smooth = edge_smoothness_loss(
                         node_logits,
                         batch.edge_index,
@@ -354,7 +356,10 @@ class Trainer:
                 loss_cls = self.criterion(node_logits, data.y)
 
                 # Spatial smoothness loss
-                edge_attr = data.edge_attr if hasattr(data, 'edge_attr') else None
+                # Extract edge attributes if available and ensure it's on the correct device
+                edge_attr = None
+                if hasattr(data, 'edge_attr') and data.edge_attr is not None:
+                    edge_attr = data.edge_attr.to(self.device)
                 loss_smooth = edge_smoothness_loss(
                     node_logits,
                     data.edge_index,
@@ -465,7 +470,10 @@ class Trainer:
             loss_cls = self.criterion(node_logits, data.y)
 
             # Spatial smoothness loss
-            edge_attr = data.edge_attr if hasattr(data, 'edge_attr') else None
+            # Extract edge attributes if available and ensure it's on the correct device
+            edge_attr = None
+            if hasattr(data, 'edge_attr') and data.edge_attr is not None:
+                edge_attr = data.edge_attr.to(self.device)
             loss_smooth = edge_smoothness_loss(
                 node_logits,
                 data.edge_index,

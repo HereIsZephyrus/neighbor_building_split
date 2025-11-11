@@ -81,7 +81,7 @@ def visualize_district_predictions(
 
     # Create figure with 2 or 3 subplots depending on whether spectral predictions exist
     n_cols = 3 if spectral_predictions is not None else 2
-    fig, axes = plt.subplots(1, n_cols, figsize=(8 * n_cols, 7))
+    fig, axes = plt.subplots(1, n_cols, figsize=(5 * n_cols, 5))
 
     # Get plot bounds
     minx, miny, maxx, maxy = buildings_gdf.total_bounds
@@ -227,18 +227,19 @@ def log_district_visualizations_to_tensorboard(
     device: str = 'cuda',
     district_path: Path = None,
     adjacency_dir: Optional[Path] = None,
-    enable_spectral_clustering: bool = True,
-    use_connected_components: bool = False,
-    min_component_size: int = 3
+    enable_spectral_clustering: bool = True
 ) -> None:
     """
     Log district visualizations to TensorBoard.
 
-    Follows inference.py pipeline:
+    Follows inference.py pipeline with connected component separation:
     1. GAT forward pass to get embeddings and logits
-    2. Spectral clustering on embeddings + features (with optional connected component separation)
-    3. Confidence-weighted voting to map clusters to labels
-    4. Visualize: Ground Truth vs GAT Direct vs Spectral Clustering
+    2. Identify connected components in the graph
+    3. Process each component independently:
+       - Apply spectral clustering to components with >= min_component_size buildings
+       - Use majority voting for smaller components
+    4. Confidence-weighted voting to map clusters to labels
+    5. Visualize: Ground Truth vs GAT Direct vs Spectral Clustering
 
     Args:
         writer: TensorBoard SummaryWriter
@@ -251,9 +252,7 @@ def log_district_visualizations_to_tensorboard(
         device: Device to run model on
         district_path: Path to district shapefile (for spatial matching)
         adjacency_dir: Directory containing adjacency matrices (required for spectral clustering)
-        enable_spectral_clustering: Whether to perform spectral clustering (先聚类再分类)
-        use_connected_components: Whether to use connected component separation (Plan B)
-        min_component_size: Minimum buildings for spectral clustering in component mode
+        enable_spectral_clustering: Whether to perform spectral clustering
     """
     if not data_list:
         logger.warning("No data provided for visualization")
@@ -296,6 +295,7 @@ def log_district_visualizations_to_tensorboard(
         spectral_config.setdefault('distance_weight', 0.2)
         spectral_config.setdefault('distance_scale', 100.0)
         spectral_config.setdefault('use_confidence_weighted_voting', True)
+        spectral_config.setdefault('min_component_size', 3)
 
     # Set model to evaluation mode
     model.eval()
@@ -313,11 +313,16 @@ def log_district_visualizations_to_tensorboard(
                 # Get GAT predictions and embeddings
                 data_device = data.to(device_obj)
 
+                # Extract edge_attr if available and ensure it's on the correct device
+                edge_attr = None
+                if hasattr(data_device, 'edge_attr') and data_device.edge_attr is not None:
+                    edge_attr = data_device.edge_attr.to(device_obj)
+
                 # Check if model has forward_inference method (for embeddings)
                 if hasattr(model, 'forward_inference'):
-                    logits, embeddings = model.forward_inference(data_device.x, data_device.edge_index)
+                    logits, embeddings = model.forward_inference(data_device.x, data_device.edge_index, edge_attr)
                 else:
-                    logits = model(data_device.x, data_device.edge_index)
+                    logits = model(data_device.x, data_device.edge_index, edge_attr)
                     embeddings = None  # No embeddings available
 
                 gat_predictions = logits.argmax(dim=1).cpu().numpy()
@@ -373,7 +378,7 @@ def log_district_visualizations_to_tensorboard(
                         embeddings_np = embeddings_np[:min_len]
                     logits_np = logits_np[:min_len]
 
-                # Perform spectral clustering (先聚类再分类) with optional connected component separation
+                # Perform spectral clustering with connected component separation
                 spectral_predictions = None
                 spectral_clusters_array = None
                 if enable_spectral_clustering and embeddings_np is not None and adjacency_dir is not None:
@@ -392,112 +397,91 @@ def log_district_visualizations_to_tensorboard(
                             if 'voroniarea' in district_buildings.columns:
                                 voronoi_areas = dict(zip(building_ids, district_buildings['voroniarea'].values))
 
-                            # PLAN B: Connected Component Separation (mirrors inference.py logic)
-                            if use_connected_components:
-                                logger.debug(f"District {district_id}: Using connected component separation (Plan B)")
+                            # Use connected component separation to ensure spatial contiguity
+                            logger.debug(f"District {district_id}: Using connected component separation")
 
-                                # Identify connected components
-                                component_labels, num_components = get_connected_components(
-                                    data_device.edge_index,
-                                    data_device.num_nodes
-                                )
-                                component_labels_np = component_labels.cpu().numpy()
-                                logger.debug(f"  Found {num_components} connected components")
+                            # Identify connected components
+                            component_labels, num_components = get_connected_components(
+                                data_device.edge_index,
+                                data_device.num_nodes
+                            )
+                            component_labels_np = component_labels.cpu().numpy()
+                            logger.debug(f"  Found {num_components} connected components")
 
-                                # Process each component independently
-                                component_results = []
-                                for comp_id in range(num_components):
-                                    comp_mask = (component_labels_np == comp_id)
-                                    comp_size = comp_mask.sum()
+                            # Process each component independently
+                            component_results = []
+                            for comp_id in range(num_components):
+                                comp_mask = (component_labels_np == comp_id)
+                                comp_size = comp_mask.sum()
 
-                                    # Extract component data
-                                    comp_data, _ = extract_subgraph(data_device, comp_mask, building_ids)
+                                # Extract component data
+                                comp_data, _ = extract_subgraph(data_device, comp_mask, building_ids)
 
-                                    # GAT forward for component
-                                    if hasattr(model, 'forward_inference'):
-                                        comp_logits, comp_embeddings = model.forward_inference(
-                                            comp_data.x, comp_data.edge_index
-                                        )
-                                    else:
-                                        comp_logits = model(comp_data.x, comp_data.edge_index)
-                                        comp_embeddings = None
+                                # Extract edge_attr if available and ensure it's on the correct device
+                                comp_edge_attr = None
+                                if hasattr(comp_data, 'edge_attr') and comp_data.edge_attr is not None:
+                                    comp_edge_attr = comp_data.edge_attr.to(device_obj)
 
-                                    comp_embeddings_np = comp_embeddings.cpu().numpy() if comp_embeddings is not None else None
-                                    comp_logits_np = comp_logits.cpu().numpy()
-                                    comp_gat_labels = comp_logits.argmax(dim=1).cpu().numpy()
+                                # GAT forward for component
+                                if hasattr(model, 'forward_inference'):
+                                    comp_logits, comp_embeddings = model.forward_inference(
+                                        comp_data.x, comp_data.edge_index, comp_edge_attr
+                                    )
+                                else:
+                                    comp_logits = model(comp_data.x, comp_data.edge_index, comp_edge_attr)
+                                    comp_embeddings = None
 
-                                    # Apply spectral clustering if component is large enough
-                                    if comp_size >= min_component_size and comp_embeddings_np is not None:
-                                        comp_building_ids = [building_ids[i] for i in range(len(comp_mask)) if comp_mask[i]]
-                                        comp_clustering_features = clustering_features[comp_mask]
-                                        comp_adjacency = extract_subgraph_from_adjacency(adjacency_matrix, comp_building_ids)
-                                        comp_voronoi_areas = {bid: voronoi_areas[bid] for bid in comp_building_ids} if voronoi_areas else None
+                                comp_embeddings_np = comp_embeddings.cpu().numpy() if comp_embeddings is not None else None
+                                comp_logits_np = comp_logits.cpu().numpy()
+                                comp_gat_labels = comp_logits.argmax(dim=1).cpu().numpy()
 
-                                        comp_clusters, comp_final_labels, _, _ = perform_spectral_clustering_pipeline(
-                                            embeddings=comp_embeddings_np,
-                                            features=comp_clustering_features,
-                                            adjacency_matrix=comp_adjacency,
-                                            gat_labels=comp_gat_labels,
-                                            gat_logits=comp_logits_np,
-                                            building_ids=comp_building_ids,
-                                            voronoi_areas=comp_voronoi_areas,
-                                            n_clusters=None,
-                                            use_confidence_weighted_voting=spectral_config['use_confidence_weighted_voting'],
-                                            embedding_weight=spectral_config['embedding_weight'],
-                                            feature_weight=spectral_config['feature_weight'],
-                                            distance_weight=spectral_config['distance_weight'],
-                                            distance_scale=spectral_config['distance_scale'],
-                                            random_state=42
-                                        )
-                                    else:
-                                        # Small component: majority voting
-                                        comp_clusters = np.zeros(comp_size, dtype=int)
-                                        majority_label = np.argmax(np.bincount(comp_gat_labels))
-                                        comp_final_labels = np.full(comp_size, majority_label, dtype=int)
+                                # Apply spectral clustering if component is large enough
+                                if comp_size >= spectral_config['min_component_size'] and comp_embeddings_np is not None:
+                                    comp_building_ids = [building_ids[i] for i in range(len(comp_mask)) if comp_mask[i]]
+                                    comp_clustering_features = clustering_features[comp_mask]
+                                    comp_adjacency = extract_subgraph_from_adjacency(adjacency_matrix, comp_building_ids)
+                                    comp_voronoi_areas = {bid: voronoi_areas[bid] for bid in comp_building_ids} if voronoi_areas else None
 
-                                    component_results.append({
-                                        'component_id': comp_id,
-                                        'num_nodes': comp_size,
-                                        'embeddings': comp_embeddings_np if comp_embeddings_np is not None else np.zeros((comp_size, embeddings_np.shape[1])),
-                                        'logits': comp_logits_np,
-                                        'gat_labels': comp_gat_labels,
-                                        'cluster_assignments': comp_clusters,
-                                        'final_labels': comp_final_labels,
-                                        'node_mask': comp_mask
-                                    })
+                                    comp_clusters, comp_final_labels, _, _ = perform_spectral_clustering_pipeline(
+                                        embeddings=comp_embeddings_np,
+                                        features=comp_clustering_features,
+                                        adjacency_matrix=comp_adjacency,
+                                        gat_labels=comp_gat_labels,
+                                        gat_logits=comp_logits_np,
+                                        building_ids=comp_building_ids,
+                                        voronoi_areas=comp_voronoi_areas,
+                                        n_clusters=None,
+                                        use_confidence_weighted_voting=spectral_config['use_confidence_weighted_voting'],
+                                        embedding_weight=spectral_config['embedding_weight'],
+                                        feature_weight=spectral_config['feature_weight'],
+                                        distance_weight=spectral_config['distance_weight'],
+                                        distance_scale=spectral_config['distance_scale'],
+                                        random_state=42
+                                    )
+                                else:
+                                    # Small component: majority voting
+                                    comp_clusters = np.zeros(comp_size, dtype=int)
+                                    majority_label = np.argmax(np.bincount(comp_gat_labels))
+                                    comp_final_labels = np.full(comp_size, majority_label, dtype=int)
 
-                                # Merge results
-                                merged = merge_component_results(component_results, component_labels_np)
-                                spectral_clusters_array = merged['cluster_assignments']
-                                spectral_predictions = merged['final_labels']
+                                component_results.append({
+                                    'component_id': comp_id,
+                                    'num_nodes': comp_size,
+                                    'embeddings': comp_embeddings_np if comp_embeddings_np is not None else np.zeros((comp_size, embeddings_np.shape[1])),
+                                    'logits': comp_logits_np,
+                                    'gat_labels': comp_gat_labels,
+                                    'cluster_assignments': comp_clusters,
+                                    'final_labels': comp_final_labels,
+                                    'node_mask': comp_mask
+                                })
 
-                                logger.debug(f"District {district_id}: Plan B completed, "
-                                           f"{num_components} components → {len(np.unique(spectral_clusters_array))} clusters")
+                            # Merge results
+                            merged = merge_component_results(component_results, component_labels_np)
+                            spectral_clusters_array = merged['cluster_assignments']
+                            spectral_predictions = merged['final_labels']
 
-                            # ORIGINAL METHOD: Global spectral clustering
-                            else:
-                                spectral_clusters_result, _, cluster_to_label, _ = perform_spectral_clustering_pipeline(
-                                    embeddings=embeddings_np,
-                                    features=clustering_features,
-                                    adjacency_matrix=adjacency_matrix,
-                                    gat_labels=gat_predictions,
-                                    gat_logits=logits_np,
-                                    building_ids=building_ids,
-                                    voronoi_areas=voronoi_areas,
-                                    n_clusters=None,
-                                    use_confidence_weighted_voting=spectral_config['use_confidence_weighted_voting'],
-                                    embedding_weight=spectral_config['embedding_weight'],
-                                    feature_weight=spectral_config['feature_weight'],
-                                    distance_weight=spectral_config['distance_weight'],
-                                    distance_scale=spectral_config['distance_scale'],
-                                    random_state=42
-                                )
-
-                                spectral_clusters_array = np.array(spectral_clusters_result)
-                                spectral_predictions = np.array([cluster_to_label[c] for c in spectral_clusters_result])
-
-                                logger.debug(f"District {district_id}: Spectral clustering completed, "
-                                           f"{len(np.unique(spectral_clusters_array))} clusters -> {len(np.unique(spectral_predictions))} labels")
+                            logger.debug(f"District {district_id}: Connected component separation completed, "
+                                       f"{num_components} components → {len(np.unique(spectral_clusters_array))} clusters")
                         else:
                             logger.debug(f"Adjacency matrix not found: {adjacency_path}")
                     except Exception as e:

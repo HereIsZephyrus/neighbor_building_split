@@ -152,9 +152,9 @@ class VoronoiGenerator:
         outside_mask = (district_mask == 0)
         vis_img[outside_mask] = [40, 40, 40]
 
-        # 关键修复：标记未分类的像素为红色（在区域内但没有标签）
+        # Critical fix: mark unlabeled pixels as red (inside district but no label)
         unlabeled_mask = (labeled_array == 0) & (district_mask == 1)
-        vis_img[unlabeled_mask] = [0, 0, 255]  # BGR: 红色表示未分类
+        vis_img[unlabeled_mask] = [0, 0, 255]  # BGR: red indicates unlabeled
 
         # Overlay buildings in white (on top of voronoi colors)
         if buildings_mask is not None:
@@ -190,7 +190,7 @@ class VoronoiGenerator:
 
         # Calculate remaining unlabeled pixels
         unlabeled = ((labeled_array == 0) & (district_mask == 1)).sum()
-        # 如果有未分类像素，用红色警告；否则用青色
+        # If there are unlabeled pixels, use red warning; otherwise use cyan
         text_color = (0, 0, 255) if unlabeled > 0 else (0, 255, 255)
         progress_text = f"Unlabeled: {unlabeled} pixels" + (" (RED)" if unlabeled > 0 else "")
         text_y = text_h + baseline + 35
@@ -210,7 +210,6 @@ class VoronoiGenerator:
             cv2.LINE_AA
         )
 
-        # 添加颜色图例
         legend_y = text_y + prog_h + prog_baseline + 20
         legend_texts = [
             ("White = Buildings", (255, 255, 255)),
@@ -373,7 +372,7 @@ class VoronoiGenerator:
         if remaining > 0:
             logger.warning("Still have %d unlabeled pixels after dilation", remaining)
 
-            # 显示最终结果（包含未分类像素）
+            # Show final result (including unlabeled pixels)
             if visualize:
                 logger.info("Showing final result with %d unlabeled pixels (red color)", remaining)
                 self._visualize_labels(
@@ -381,7 +380,7 @@ class VoronoiGenerator:
                     buildings_mask=buildings_mask, debug_mode=debug_mode,
                     window_name=window_name
                 )
-                # 等待用户查看或自动等待
+                # Wait for user review or auto-wait
                 if debug_mode:
                     logger.info("Press SPACE to continue or 'q' to quit")
                     while True:
@@ -389,7 +388,7 @@ class VoronoiGenerator:
                         if key == ord(' ') or key == ord('q'):
                             break
                 else:
-                    cv2.waitKey(3000)  # 等待3秒
+                    cv2.waitKey(3000)  # Wait 3 seconds
 
         # Cleanup visualization
         if visualize:

@@ -8,7 +8,7 @@ from .models import GAT
 from .training import Trainer
 from .training.tensorborad_utils import log_district_visualizations_to_tensorboard
 from .utils import get_logger
-from .data import kfold_split
+from .data import kfold_split, overlapping_cv_split
 
 try:
     from mpi4py import MPI
@@ -21,6 +21,16 @@ logger = get_logger(__name__)
 
 def train_cross_validation_mpi(config, dataset, args):
     """Train using K-fold cross-validation with MPI parallelization.
+
+    Each fold is assigned 2 MPI processes:
+    - Process 0: Handles training computation
+    - Process 1: Handles TensorBoard writing and visualization plotting
+
+    Example: 5 folds require 10 MPI processes
+    - Fold 1: rank 0 (training), rank 1 (visualization)
+    - Fold 2: rank 2 (training), rank 3 (visualization)
+    - Fold 3: rank 4 (training), rank 5 (visualization)
+    - ...
 
     Args:
         config: Training configuration
@@ -37,16 +47,26 @@ def train_cross_validation_mpi(config, dataset, args):
     size = comm.Get_size()
 
     n_folds = config.k_fold
+    procs_per_fold = 2  # 2 processes per fold
 
     if rank == 0:
         logger.info("=" * 80)
-        logger.info("K-Fold Cross-Validation with MPI")
+        logger.info("K-Fold Cross-Validation with MPI (2 processes per fold)")
         logger.info("Number of folds: %d", n_folds)
-        logger.info("MPI processes: %d", size)
+        logger.info("MPI processes: %d (expected: %d)", size, n_folds * procs_per_fold)
         logger.info("=" * 80)
 
-        if size > n_folds:
-            logger.warning("More MPI processes (%d) than folds (%d). Extra processes will be idle.", size, n_folds)
+        if size < n_folds * procs_per_fold:
+            logger.warning(
+                "Not enough MPI processes (%d) for %d folds with 2 processes each (need %d).",
+                size, n_folds, n_folds * procs_per_fold
+            )
+            logger.warning("Some folds will run sequentially.")
+        elif size > n_folds * procs_per_fold:
+            logger.warning(
+                "Extra MPI processes (%d > %d). Excess processes will be idle.",
+                size, n_folds * procs_per_fold
+            )
 
     # Prepare data
     data_list = [dataset.get(i) for i in range(len(dataset))]
@@ -66,87 +86,197 @@ def train_cross_validation_mpi(config, dataset, args):
         shared_tensorboard_base_dir = comm.bcast(shared_tensorboard_base_dir, root=0)
         logger.info("Rank %d: TensorBoard base directory: %s", rank, shared_tensorboard_base_dir)
 
-    # Each rank processes specific folds
+    # Determine which fold this rank is assigned to
+    # Each fold uses 2 ranks: even rank trains, odd rank visualizes
+    fold_idx = rank // procs_per_fold + 1  # fold index (1-based)
+    is_trainer = (rank % procs_per_fold == 0)  # even rank = trainer, odd rank = visualizer
+
+    # Skip if this rank is beyond the number of folds
+    if fold_idx > n_folds:
+        logger.info(f"Rank {rank}: Idle (fold {fold_idx} > {n_folds} folds)")
+        return []
+
+    # Create fold-specific communicator for the 2 processes handling this fold
+    fold_comm = comm.Split(color=fold_idx, key=rank)
+    # fold_rank = 0 for trainer, 1 for visualizer
+
+    logger.info(
+        "Rank %d: Assigned to Fold %d/%d, Role: %s",
+        rank, fold_idx, n_folds, 'Trainer' if is_trainer else 'Visualizer'
+    )
+
     fold_results = []
 
-    for fold_idx, (train_data, val_data) in enumerate(kfold_split(data_list, n_splits=n_folds, random_seed=config.seed), 1):
-        # Distribute folds across MPI processes
-        if (fold_idx - 1) % size != rank:
-            continue  # This fold is not assigned to this rank
+    # Choose CV split method based on config
+    cv_mode = getattr(config, 'cv_mode', 'standard')
+    if rank == 0:  # Only log once
+        if cv_mode == 'overlapping':
+            logger.info("Using overlapping CV split")
+        else:
+            logger.info("Using standard k-fold CV split")
+
+    if cv_mode == 'overlapping':
+        cv_split_func = lambda data_list: overlapping_cv_split(
+            data_list,
+            n_splits=n_folds,
+            val_ratio=getattr(config, 'val_ratio', 0.3),
+            overlap_ratio=getattr(config, 'overlap_ratio', 0.15),
+            random_seed=config.seed
+        )
+    else:
+        cv_split_func = lambda data_list: kfold_split(
+            data_list,
+            n_splits=n_folds,
+            random_seed=config.seed
+        )
+
+    # Get train/val split for this fold
+    for current_fold_idx, (train_data, val_data) in enumerate(cv_split_func(data_list), 1):
+        if current_fold_idx != fold_idx:
+            continue  # Skip folds not assigned to this rank pair
 
         logger.info("=" * 80)
         logger.info("Rank %d: Training Fold %d/%d", rank, fold_idx, n_folds)
         logger.info("=" * 80)
         logger.info("Train: %d districts, Val: %d districts", len(train_data), len(val_data))
 
-        # Create fold-specific TensorBoard writer (避免写入冲突)
-        fold_writer = None
-        if shared_tensorboard_base_dir is not None:
-            fold_log_dir = Path(shared_tensorboard_base_dir) / f"fold{fold_idx}"
-            fold_log_dir.mkdir(parents=True, exist_ok=True)
-            fold_writer = SummaryWriter(log_dir=str(fold_log_dir))
-            logger.info("Rank %d: Fold %d TensorBoard logging to %s", rank, fold_idx, fold_log_dir)
-
-        # Initialize model for this fold
-        logger.info("Initializing model for fold %d...", fold_idx)
-        model = GAT(
-            in_features=dataset.num_features,
-            hidden_dim=config.hidden_dim,
-            num_classes=config.num_classes,
-            num_layers=config.num_layers,
-            num_heads=config.num_heads,
-            dropout=config.dropout,
-            negative_slope=config.negative_slope,
-            add_self_loops=config.add_self_loops
-        )
-
         # Create fold-specific config
         fold_config = copy.deepcopy(config)
         fold_config.model_identifier = f"{config.model_identifier}_fold{fold_idx}"
         fold_config.checkpoint_dir = f"{config.checkpoint_dir}/fold{fold_idx}"
         fold_config.output_dir = f"{config.output_dir}/fold{fold_idx}"
-        fold_config.enable_tensorboard = False  # Use shared writer
+        fold_config.enable_tensorboard = False  # Disable trainer's internal TensorBoard
+        fold_config.enable_visualization = False  # Disable trainer's internal visualization
 
-        # Create directories (MPI-safe: use try-except to handle race condition)
+        # Create directories (MPI-safe)
         try:
             Path(fold_config.checkpoint_dir).mkdir(parents=True, exist_ok=True)
         except FileExistsError:
-            pass  # Another process already created it
-
+            pass
         try:
             Path(fold_config.output_dir).mkdir(parents=True, exist_ok=True)
         except FileExistsError:
-            pass  # Another process already created it
+            pass
 
-        # Initialize trainer
-        logger.info("Rank %d: Initializing trainer for fold %d...", rank, fold_idx)
-        trainer = Trainer(
-            model=model,
-            config=fold_config,
-            train_data_list=train_data,
-            val_data_list=val_data
-        )
+        # === TRAINER PROCESS (fold_rank=0) ===
+        if is_trainer:
+            logger.info("Rank %d (Trainer): Training fold %d...", rank, fold_idx)
 
-        # Train this fold
-        try:
-            history = trainer.train()
+            # Initialize model
+            model = GAT(
+                in_features=dataset.num_features,
+                hidden_dim=config.hidden_dim,
+                num_classes=config.num_classes,
+                num_layers=config.num_layers,
+                num_heads=config.num_heads,
+                dropout=config.dropout,
+                negative_slope=config.negative_slope,
+                add_self_loops=config.add_self_loops
+            )
 
-            best_val_acc = max(history.get('val_acc', [0])) if history.get('val_acc') else 0
-            logger.info("Rank %d: Fold %d completed! Best validation accuracy: %.4f", rank, fold_idx, best_val_acc)
+            # Initialize trainer
+            trainer = Trainer(
+                model=model,
+                config=fold_config,
+                train_data_list=train_data,
+                val_data_list=val_data
+            )
 
-            fold_results.append({
-                'fold': fold_idx,
-                'best_val_acc': best_val_acc,
-                'history': history
-            })
+            # Train
+            try:
+                history = trainer.train()
+                best_val_acc = max(history.get('val_acc', [0])) if history.get('val_acc') else 0
+                logger.info("Rank %d (Trainer): Fold %d completed! Best val acc: %.4f", 
+                           rank, fold_idx, best_val_acc)
 
-            # Generate visualizations for this fold (each rank visualizes its own fold)
-            if fold_writer is not None:
-                logger.info("Rank %d: Generating visualizations for fold %d...", rank, fold_idx)
-                logger.info("Rank %d: Fold writer directory: %s", rank, fold_writer.log_dir)
+                fold_results.append({
+                    'fold': fold_idx,
+                    'best_val_acc': best_val_acc,
+                    'history': history
+                })
+
+                # Send model state and results to visualizer process
+                logger.info("Rank %d (Trainer): Sending model to visualizer...", rank)
+                model_state = model.state_dict()
+                fold_comm.send({'model_state': model_state, 'history': history}, dest=1)
+                logger.info("Rank %d (Trainer): Model sent to visualizer", rank)
+
+            except KeyboardInterrupt:
+                logger.info("Rank %d (Trainer): Training interrupted", rank)
+                fold_comm.send({'model_state': None, 'history': None}, dest=1)  # Notify visualizer
+                raise
+            except Exception as exc:
+                logger.error("Rank %d (Trainer): Training failed: %s", rank, exc, exc_info=True)
+                fold_comm.send({'model_state': None, 'history': None}, dest=1)  # Notify visualizer
+                raise
+
+        # === VISUALIZER PROCESS (fold_rank=1) ===
+        else:
+            logger.info("Rank %d (Visualizer): Waiting for training to complete...", rank)
+
+            # Wait for model from trainer
+            try:
+                data_from_trainer = fold_comm.recv(source=0)
+                model_state = data_from_trainer.get('model_state')
+                history = data_from_trainer.get('history')
+
+                if model_state is None:
+                    logger.warning("Rank %d (Visualizer): Training failed or interrupted, skipping visualization", rank)
+                    continue
+
+                logger.info("Rank %d (Visualizer): Received model, starting visualization...", rank)
+
+                # Initialize model and load state
+                model = GAT(
+                    in_features=dataset.num_features,
+                    hidden_dim=config.hidden_dim,
+                    num_classes=config.num_classes,
+                    num_layers=config.num_layers,
+                    num_heads=config.num_heads,
+                    dropout=config.dropout,
+                    negative_slope=config.negative_slope,
+                    add_self_loops=config.add_self_loops
+                )
+                model.load_state_dict(model_state)
+
+                # Move model to the correct device (GPU if available)
+                import torch
+                device = torch.device(fold_config.device if hasattr(fold_config, 'device') else 'cuda' if torch.cuda.is_available() else 'cpu')
+                model.to(device)
+                model.eval()
+
+                logger.info("Rank %d (Visualizer): Model loaded to device: %s", rank, device)
+
+                # Create TensorBoard writer
+                fold_writer = None
+                if shared_tensorboard_base_dir is not None:
+                    fold_log_dir = Path(shared_tensorboard_base_dir) / f"fold{fold_idx}"
+                    fold_log_dir.mkdir(parents=True, exist_ok=True)
+                    fold_writer = SummaryWriter(log_dir=str(fold_log_dir))
+                    logger.info("Rank %d (Visualizer): TensorBoard logging to %s", rank, fold_log_dir)
+
+                # Log metrics to TensorBoard
+                if fold_writer is not None and history is not None:
+                    logger.info("Rank %d (Visualizer): Logging metrics to TensorBoard...", rank)
+                    train_losses = history.get('train_loss', [])
+                    train_accs = history.get('train_acc', [])
+                    val_losses = history.get('val_loss', [])
+                    val_accs = history.get('val_acc', [])
+
+                    for epoch_idx, (train_loss, train_acc) in enumerate(zip(train_losses, train_accs), 1):
+                        fold_writer.add_scalar('train/loss', train_loss, epoch_idx)
+                        fold_writer.add_scalar('train/accuracy', train_acc, epoch_idx)
+
+                    val_interval = fold_config.val_interval
+                    for val_idx, (val_loss, val_acc) in enumerate(zip(val_losses, val_accs)):
+                        epoch_idx = (val_idx + 1) * val_interval
+                        fold_writer.add_scalar('val/loss', val_loss, epoch_idx)
+                        fold_writer.add_scalar('val/accuracy', val_acc, epoch_idx)
+
+                logger.info("Rank %d (Visualizer): Generating visualizations for fold %d...", rank, fold_idx)
 
                 # Visualize training data
-                if train_data:
+                if train_data and fold_writer is not None:
                     try:
                         max_visualize = getattr(fold_config, 'max_visualize_districts', 9)
                         logger.info("Rank %d: Fold %d - visualizing %d training districts", 
@@ -157,7 +287,7 @@ def train_cross_validation_mpi(config, dataset, args):
                             data_list=train_data[:max_visualize],
                             building_path=Path(fold_config.building_path),
                             epoch=fold_idx,
-                            tag=f'train',
+                            tag='train',
                             max_districts=max_visualize,
                             device=fold_config.device,
                             district_path=Path(fold_config.district_path) if hasattr(fold_config, 'district_path') else None,
@@ -170,10 +300,10 @@ def train_cross_validation_mpi(config, dataset, args):
                                    rank, fold_idx, e, exc_info=True)
 
                 # Visualize validation data
-                if val_data:
+                if val_data and fold_writer is not None:
                     try:
                         max_visualize = getattr(fold_config, 'max_visualize_districts', 9)
-                        logger.info("Rank %d: Fold %d - visualizing %d validation districts", 
+                        logger.info("Rank %d (Visualizer): Fold %d - visualizing %d validation districts", 
                                    rank, fold_idx, min(max_visualize, len(val_data)))
                         log_district_visualizations_to_tensorboard(
                             writer=fold_writer,
@@ -181,32 +311,29 @@ def train_cross_validation_mpi(config, dataset, args):
                             data_list=val_data[:max_visualize],
                             building_path=Path(fold_config.building_path),
                             epoch=fold_idx,
-                            tag=f'val',
+                            tag='val',
                             max_districts=max_visualize,
                             device=fold_config.device,
                             district_path=Path(fold_config.district_path) if hasattr(fold_config, 'district_path') else None,
                             adjacency_dir=Path(fold_config.adjacency_dir) if hasattr(fold_config, 'adjacency_dir') else None,
                             enable_spectral_clustering=True
                         )
-                        logger.info("Rank %d: Completed validation visualizations for fold %d", rank, fold_idx)
+                        logger.info("Rank %d (Visualizer): Completed validation visualizations for fold %d", rank, fold_idx)
                     except Exception as e:
-                        logger.error("Rank %d: Failed to generate validation visualizations for fold %d: %s", 
+                        logger.error("Rank %d (Visualizer): Failed to generate validation visualizations for fold %d: %s", 
                                    rank, fold_idx, e, exc_info=True)
 
-            # Close fold-specific writer
-            if fold_writer is not None:
-                fold_writer.flush()
-                logger.info("Rank %d: Flushed fold %d writer", rank, fold_idx)
-                fold_writer.close()
-                logger.info("Rank %d: Closed fold %d writer", rank, fold_idx)
+                # Close fold-specific writer
+                if fold_writer is not None:
+                    fold_writer.flush()
+                    fold_writer.close()
+                    logger.info("Rank %d (Visualizer): Closed TensorBoard writer for fold %d", rank, fold_idx)
 
-        except Exception as exc:
-            logger.error("Rank %d: Training failed for fold %d: %s", rank, fold_idx, exc, exc_info=True)
-            fold_results.append({
-                'fold': fold_idx,
-                'best_val_acc': 0.0,
-                'error': str(exc)
-            })
+                logger.info("Rank %d (Visualizer): Visualization completed for fold %d", rank, fold_idx)
+
+            except Exception as exc:
+                logger.error("Rank %d (Visualizer): Visualization failed for fold %d: %s", 
+                           rank, fold_idx, exc, exc_info=True)
 
     # Gather results from all ranks
     all_fold_results = comm.gather(fold_results, root=0)
@@ -350,8 +477,27 @@ def train_cross_validation_sequential(config, dataset, args):
     else:
         shared_writer = None
 
+    # Choose CV split method based on config
+    cv_mode = getattr(config, 'cv_mode', 'standard')
+    if cv_mode == 'overlapping':
+        logger.info("Using overlapping CV split")
+        cv_split_func = lambda data_list: overlapping_cv_split(
+            data_list,
+            n_splits=n_folds,
+            val_ratio=getattr(config, 'val_ratio', 0.3),
+            overlap_ratio=getattr(config, 'overlap_ratio', 0.15),
+            random_seed=config.seed
+        )
+    else:
+        logger.info("Using standard k-fold CV split")
+        cv_split_func = lambda data_list: kfold_split(
+            data_list,
+            n_splits=n_folds,
+            random_seed=config.seed
+        )
+
     # Perform K-fold cross-validation
-    for fold_idx, (train_data, val_data) in enumerate(kfold_split(data_list, n_splits=n_folds, random_seed=config.seed), 1):
+    for fold_idx, (train_data, val_data) in enumerate(cv_split_func(data_list), 1):
         logger.info("=" * 80)
         logger.info("Training Fold %d/%d", fold_idx, n_folds)
         logger.info("=" * 80)

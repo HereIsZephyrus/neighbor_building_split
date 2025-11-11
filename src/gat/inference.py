@@ -22,6 +22,13 @@ from .data.data_utils import load_district_graph
 from .utils.logger import setup_logger, get_logger
 from .utils.spectral_clustering import perform_spectral_clustering_pipeline
 from .utils.feature_extractor import extract_clustering_features
+from .utils.graph_utils import get_connected_components
+from .utils.graph_utils_ext import (
+    extract_subgraph,
+    extract_subgraph_from_adjacency,
+    merge_component_results,
+    get_component_statistics
+)
 
 logger = get_logger(__name__)
 
@@ -76,6 +83,17 @@ def parse_args():
         '--batch-inference',
         action='store_true',
         help='Use batch inference for large graphs (currently full-graph only)'
+    )
+    parser.add_argument(
+        '--use-connected-components',
+        action='store_true',
+        help='Use connected component separation (Plan B): process each spatial component independently'
+    )
+    parser.add_argument(
+        '--min-component-size',
+        type=int,
+        default=3,
+        help='Minimum buildings in a component to apply spectral clustering (only for --use-connected-components)'
     )
 
     return parser.parse_args()
@@ -147,7 +165,9 @@ def generate_embeddings_for_district(
     device: str,
     scaler=None,
     perform_clustering: bool = True,
-    n_clusters: Optional[int] = None
+    n_clusters: Optional[int] = None,
+    use_connected_components: bool = False,
+    min_component_size: int = 3
 ) -> tuple:
     """
     Generate embeddings for a single district and optionally perform spectral clustering.
@@ -161,10 +181,13 @@ def generate_embeddings_for_district(
         scaler: Optional pre-fitted StandardScaler
         perform_clustering: Whether to perform spectral clustering
         n_clusters: Number of clusters (auto-estimate if None)
+        use_connected_components: Whether to use connected component separation (Plan B)
+        min_component_size: Minimum buildings for spectral clustering in component mode
 
     Returns:
         Tuple of (embeddings, logits, gat_labels, spectral_clusters, 
-                  cluster_to_label, original_labels, num_nodes, n_clusters, scaler, has_labels)
+                  cluster_to_label, original_labels, num_nodes, n_clusters, scaler, has_labels,
+                  component_labels, component_stats)
     """
 
     try:
@@ -243,18 +266,18 @@ def generate_embeddings_for_district(
                 district_id, embeddings_np.shape, len(np.unique(gat_labels_np))
             )
 
-        # Perform spectral clustering
+        # Initialize component-related variables
+        component_labels_np = None
+        component_stats = None
+
+        # Perform spectral clustering (with or without connected components)
         spectral_clusters = None
         cluster_to_label = None
         final_n_clusters = n_clusters
 
         if perform_clustering:
             try:
-                # Load spectral clustering configuration from training config if available
-                # These parameters control the two-stage classification + spatial smoothing approach
-
-
-                # Try to load configuration
+                # Load spectral clustering configuration
                 config_path = Path(__file__).parent / 'training_config.yaml'
                 if config_path.exists():
                     with open(config_path, 'r', encoding='utf-8') as f:
@@ -265,44 +288,169 @@ def generate_embeddings_for_district(
                     distance_weight = spectral_config.get('distance_weight', 0.2)
                     distance_scale = spectral_config.get('distance_scale', 100.0)
                     use_confidence_weighted = spectral_config.get('use_confidence_weighted_voting', True)
-                    area_threshold = spectral_config.get('area_threshold_m2', 1_000_000)
                     logger.info("Loaded spectral clustering config: emb=%.2f, feat=%.2f, dist=%.2f, conf_weighted=%s",
                                embedding_weight, feature_weight, distance_weight, use_confidence_weighted)
                 else:
-                    # Use default values (optimized weights)
+                    # Use default values
                     embedding_weight = 0.3
                     feature_weight = 0.5
                     distance_weight = 0.2
                     distance_scale = 100.0
                     use_confidence_weighted = True
-                    area_threshold = 1_000_000
                     logger.warning("Config file not found, using default spectral clustering parameters")
 
-                # Perform spectral clustering with confidence-weighted voting
-                spectral_clusters, _, cluster_to_label, _ = perform_spectral_clustering_pipeline(
-                    embeddings=embeddings_np,
-                    features=clustering_features,
-                    adjacency_matrix=adjacency_matrix,
-                    gat_labels=gat_labels_np,
-                    gat_logits=logits_np,  # Pass logits for confidence-weighted voting
-                    building_ids=building_ids_in_matrix,
-                    voronoi_areas=voronoi_areas,
-                    n_clusters=n_clusters,
-                    use_confidence_weighted_voting=use_confidence_weighted,
-                    embedding_weight=embedding_weight,
-                    feature_weight=feature_weight,
-                    distance_weight=distance_weight,
-                    distance_scale=distance_scale,
-                    area_threshold_m2=area_threshold,
-                    random_state=42
-                )
+                # PLAN B: Connected Component Separation
+                if use_connected_components:
+                    logger.info("Using connected component separation (Plan B) for district %d", district_id)
 
-                final_n_clusters = len(np.unique(spectral_clusters))
+                    # Step 1: Identify connected components
+                    component_labels, num_components = get_connected_components(
+                        data.edge_index, 
+                        data.num_nodes
+                    )
+                    component_labels_np = component_labels.cpu().numpy()
 
-                logger.info(
-                    "Spectral clustering completed for district %d: %d clusters, cluster_to_label=%s",
-                    district_id, final_n_clusters, cluster_to_label
-                )
+                    # Get component statistics
+                    component_stats = get_component_statistics(
+                        component_labels_np,
+                        building_ids=building_ids_in_matrix,
+                        voronoi_areas=voronoi_areas
+                    )
+
+                    logger.info(f"  Found {num_components} connected components")
+                    for stat in component_stats:
+                        area_info = f", area={stat['total_area_km2']:.2f}km²" if 'total_area_km2' in stat else ""
+                        logger.info(f"    Component {stat['component_id']}: {stat['num_buildings']} buildings{area_info}")
+
+                    # Step 2: Process each component independently
+                    component_results = []
+
+                    for comp_id in range(num_components):
+                        comp_mask = (component_labels_np == comp_id)
+                        comp_size = comp_mask.sum()
+
+                        logger.debug(f"  Processing component {comp_id} ({comp_size} buildings)...")
+
+                        # Extract component data
+                        comp_data, node_mapping = extract_subgraph(data, comp_mask, building_ids_in_matrix)
+                        comp_data = comp_data.to(device)
+
+                        # GAT forward pass for this component
+                        with torch.no_grad():
+                            comp_logits, comp_embeddings = model.forward_inference(
+                                comp_data.x, comp_data.edge_index
+                            )
+
+                        comp_embeddings_np = comp_embeddings.cpu().numpy()
+                        comp_logits_np = comp_logits.cpu().numpy()
+                        comp_gat_labels = torch.argmax(comp_logits, dim=1).cpu().numpy()
+
+                        # Decide whether to apply spectral clustering
+                        if comp_size >= min_component_size:
+                            logger.debug(f"    Applying spectral clustering...")
+
+                            # Extract component-specific data
+                            comp_building_ids = [building_ids_in_matrix[i] for i in range(len(comp_mask)) if comp_mask[i]]
+                            comp_clustering_features = clustering_features[comp_mask]
+                            comp_adjacency = extract_subgraph_from_adjacency(adjacency_matrix, comp_building_ids)
+                            comp_voronoi_areas = {bid: voronoi_areas[bid] for bid in comp_building_ids} if voronoi_areas else None
+
+                            # Spectral clustering
+                            comp_clusters, comp_final_labels, comp_cluster_to_label, _ = perform_spectral_clustering_pipeline(
+                                embeddings=comp_embeddings_np,
+                                features=comp_clustering_features,
+                                adjacency_matrix=comp_adjacency,
+                                gat_labels=comp_gat_labels,
+                                gat_logits=comp_logits_np,
+                                building_ids=comp_building_ids,
+                                voronoi_areas=comp_voronoi_areas,
+                                n_clusters=None,  # Auto-estimate
+                                use_confidence_weighted_voting=use_confidence_weighted,
+                                embedding_weight=embedding_weight,
+                                feature_weight=feature_weight,
+                                distance_weight=distance_weight,
+                                distance_scale=distance_scale,
+                                random_state=42
+                            )
+
+                            num_clusters_comp = len(np.unique(comp_clusters))
+                            logger.debug(f"    ✓ Generated {num_clusters_comp} clusters")
+
+                        else:
+                            # Small component: use simple majority voting
+                            logger.debug(f"    Component too small, using GAT predictions only...")
+                            comp_clusters = np.zeros(comp_size, dtype=int)
+                            label_counts = np.bincount(comp_gat_labels)
+                            majority_label = np.argmax(label_counts)
+                            comp_final_labels = np.full(comp_size, majority_label, dtype=int)
+                            comp_cluster_to_label = {0: int(majority_label)}
+                            logger.debug(f"    ✓ Assigned label {majority_label} (majority vote)")
+
+                        # Store results
+                        component_results.append({
+                            'component_id': comp_id,
+                            'num_nodes': comp_size,
+                            'embeddings': comp_embeddings_np,
+                            'logits': comp_logits_np,
+                            'gat_labels': comp_gat_labels,
+                            'cluster_assignments': comp_clusters,
+                            'final_labels': comp_final_labels,
+                            'node_mask': comp_mask
+                        })
+
+                    # Step 3: Merge component results
+                    merged = merge_component_results(component_results, component_labels_np)
+
+                    # Update outputs
+                    embeddings_np = merged['embeddings']
+                    logits_np = merged['logits']
+                    gat_labels_np = merged['gat_labels']
+                    spectral_clusters = merged['cluster_assignments']
+                    # Build cluster_to_label mapping (merged from all components)
+                    cluster_to_label = {}
+                    for result in component_results:
+                        comp_offset = 0
+                        # Find offset for this component's clusters
+                        for r in component_results[:result['component_id']]:
+                            comp_offset += (r['cluster_assignments'].max() + 1) if len(r['cluster_assignments']) > 0 else 0
+                        # Add this component's mapping with offset
+                        for local_cluster, label in enumerate(np.unique(result['final_labels'])):
+                            global_cluster = local_cluster + comp_offset
+                            cluster_to_label[global_cluster] = int(label)
+
+                    final_n_clusters = len(np.unique(spectral_clusters))
+
+                    logger.info(
+                        "✓ Plan B completed for district %d: %d components → %d total clusters",
+                        district_id, num_components, final_n_clusters
+                    )
+
+                # ORIGINAL METHOD: Global spectral clustering
+                else:
+                    # Perform spectral clustering with confidence-weighted voting
+                    spectral_clusters, _, cluster_to_label, _ = perform_spectral_clustering_pipeline(
+                        embeddings=embeddings_np,
+                        features=clustering_features,
+                        adjacency_matrix=adjacency_matrix,
+                        gat_labels=gat_labels_np,
+                        gat_logits=logits_np,
+                        building_ids=building_ids_in_matrix,
+                        voronoi_areas=voronoi_areas,
+                        n_clusters=n_clusters,
+                        use_confidence_weighted_voting=use_confidence_weighted,
+                        embedding_weight=embedding_weight,
+                        feature_weight=feature_weight,
+                        distance_weight=distance_weight,
+                        distance_scale=distance_scale,
+                        random_state=42
+                    )
+
+                    final_n_clusters = len(np.unique(spectral_clusters))
+
+                    logger.info(
+                        "Spectral clustering completed for district %d: %d clusters, cluster_to_label=%s",
+                        district_id, final_n_clusters, cluster_to_label
+                    )
 
             except Exception as exc:  # pylint: disable=broad-except
                 logger.error("Spectral clustering failed for district %d: %s", district_id, exc, exc_info=True)
@@ -319,12 +467,14 @@ def generate_embeddings_for_district(
             data.num_nodes, 
             final_n_clusters,
             scaler,
-            has_labels
+            has_labels,
+            component_labels_np,
+            component_stats
         )
 
     except Exception as exc:  # pylint: disable=broad-except
         logger.error("Failed to generate embeddings for district %d: %s", district_id, exc, exc_info=True)
-        return None, None, None, None, None, None, 0, None, scaler, False
+        return None, None, None, None, None, None, 0, None, scaler, False, None, None
 
 
 def save_embeddings(
@@ -663,11 +813,14 @@ def main(args=None):
             device=args.device,
             scaler=scaler,
             perform_clustering=True,
-            n_clusters=None  # Auto-detect optimal number
+            n_clusters=None,  # Auto-detect optimal number
+            use_connected_components=args.use_connected_components,
+            min_component_size=args.min_component_size
         )
 
         (embeddings, logits, gat_labels, spectral_clusters, 
-         cluster_to_label, original_labels, num_nodes, n_clusters, scaler, has_labels) = result
+         cluster_to_label, original_labels, num_nodes, n_clusters, scaler, has_labels,
+         component_labels, component_stats) = result
 
         if embeddings is not None:
             # Save embeddings and clustering results

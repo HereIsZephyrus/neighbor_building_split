@@ -10,14 +10,24 @@ import geopandas as gpd
 import matplotlib
 import matplotlib.pyplot as plt
 from matplotlib.colors import ListedColormap
+from matplotlib.patches import Polygon
 from torch.utils.tensorboard import SummaryWriter
 from torch_geometric.data import Data
 import PIL.Image
 import yaml
+from shapely.geometry import MultiPoint
+from shapely.ops import unary_union
 
 from ..utils import get_logger
 from ..utils.spectral_clustering import perform_spectral_clustering_pipeline
 from ..utils.feature_extractor import extract_clustering_features
+from ..utils.graph_utils import get_connected_components
+from ..utils.graph_utils_ext import (
+    extract_subgraph,
+    extract_subgraph_from_adjacency,
+    merge_component_results,
+    get_component_statistics
+)
 
 matplotlib.use('Agg')  # Use non-interactive backend
 logger = get_logger(__name__)
@@ -47,7 +57,8 @@ def visualize_district_predictions(
     predictions: np.ndarray,
     ground_truth: np.ndarray,
     num_classes: int,
-    spectral_predictions: Optional[np.ndarray] = None
+    spectral_predictions: Optional[np.ndarray] = None,
+    spectral_clusters: Optional[np.ndarray] = None
 ) -> np.ndarray:
     """
     Visualize building predictions for a district.
@@ -58,7 +69,8 @@ def visualize_district_predictions(
         predictions: GAT predicted labels for each building
         ground_truth: Ground truth labels for each building
         num_classes: Number of classes
-        spectral_predictions: Optional spectral clustering predictions
+        spectral_predictions: Optional spectral clustering predictions (final labels)
+        spectral_clusters: Optional spectral clustering cluster IDs (for drawing convex hulls)
 
     Returns:
         Image as numpy array (H, W, C) in RGB format
@@ -124,15 +136,65 @@ def visualize_district_predictions(
         ax3 = axes[ax_idx]
         gdf_spectral = buildings_gdf.copy()
         gdf_spectral['label'] = spectral_predictions
+
+        # Add cluster ID if available (for convex hull drawing)
+        if spectral_clusters is not None:
+            gdf_spectral['cluster'] = spectral_clusters
+
+        # Plot buildings
         gdf_spectral.plot(ax=ax3, column='label', cmap=cmap,
                           alpha=0.7, edgecolor='black', linewidth=0.5,
                           legend=True, vmin=0, vmax=num_classes-1)
+
+        # Draw convex hulls for each cluster
+        if spectral_clusters is not None:
+            unique_clusters = np.unique(spectral_clusters)
+            # Use a colorblind-friendly palette for cluster boundaries
+            cluster_colors = plt.cm.Dark2(np.linspace(0, 1, len(unique_clusters)))
+
+            for cluster_id, color in zip(unique_clusters, cluster_colors):
+                # Get all buildings in this cluster
+                cluster_mask = gdf_spectral['cluster'] == cluster_id
+                cluster_buildings = gdf_spectral[cluster_mask]
+
+                if len(cluster_buildings) < 3:
+                    # Need at least 3 points for a convex hull, skip if too few
+                    continue
+
+                try:
+                    # Get all building centroids for this cluster
+                    points = [geom.centroid for geom in cluster_buildings.geometry]
+
+                    # Create MultiPoint and compute convex hull
+                    multi_point = MultiPoint(points)
+                    convex_hull = multi_point.convex_hull
+
+                    # Extract coordinates for plotting
+                    if convex_hull.geom_type == 'Polygon':
+                        x, y = convex_hull.exterior.xy
+                        ax3.plot(x, y, color=color, linewidth=2.5, alpha=0.8, 
+                                linestyle='-', zorder=100)
+                        # Add a subtle fill
+                        ax3.fill(x, y, color=color, alpha=0.1, zorder=50)
+                    elif convex_hull.geom_type == 'LineString':
+                        # If only 2 points, it's a line
+                        x, y = convex_hull.xy
+                        ax3.plot(x, y, color=color, linewidth=2.5, alpha=0.8,
+                                linestyle='-', zorder=100)
+
+                except Exception as e:
+                    logger.debug(f"Failed to compute convex hull for cluster {cluster_id}: {e}")
+                    continue
+
         ax3.set_xlim(plot_bounds[0], plot_bounds[1])
         ax3.set_ylim(plot_bounds[2], plot_bounds[3])
 
         spectral_accuracy = (spectral_predictions == ground_truth).mean() * 100
-        ax3.set_title(f'District {district_id}: Spectral Clustering\nAccuracy: {spectral_accuracy:.1f}%', 
-                      fontsize=12, fontweight='bold')
+        num_clusters = len(np.unique(spectral_clusters)) if spectral_clusters is not None else 0
+        title = f'District {district_id}: Spectral Clustering\nAccuracy: {spectral_accuracy:.1f}%'
+        if num_clusters > 0:
+            title += f' ({num_clusters} clusters)'
+        ax3.set_title(title, fontsize=12, fontweight='bold')
         ax3.set_aspect('equal')
         ax3.axis('off')
 
@@ -165,14 +227,16 @@ def log_district_visualizations_to_tensorboard(
     device: str = 'cuda',
     district_path: Path = None,
     adjacency_dir: Optional[Path] = None,
-    enable_spectral_clustering: bool = True
+    enable_spectral_clustering: bool = True,
+    use_connected_components: bool = False,
+    min_component_size: int = 3
 ) -> None:
     """
     Log district visualizations to TensorBoard.
 
     Follows inference.py pipeline:
     1. GAT forward pass to get embeddings and logits
-    2. Spectral clustering on embeddings + features
+    2. Spectral clustering on embeddings + features (with optional connected component separation)
     3. Confidence-weighted voting to map clusters to labels
     4. Visualize: Ground Truth vs GAT Direct vs Spectral Clustering
 
@@ -188,6 +252,8 @@ def log_district_visualizations_to_tensorboard(
         district_path: Path to district shapefile (for spatial matching)
         adjacency_dir: Directory containing adjacency matrices (required for spectral clustering)
         enable_spectral_clustering: Whether to perform spectral clustering (先聚类再分类)
+        use_connected_components: Whether to use connected component separation (Plan B)
+        min_component_size: Minimum buildings for spectral clustering in component mode
     """
     if not data_list:
         logger.warning("No data provided for visualization")
@@ -230,7 +296,6 @@ def log_district_visualizations_to_tensorboard(
         spectral_config.setdefault('distance_weight', 0.2)
         spectral_config.setdefault('distance_scale', 100.0)
         spectral_config.setdefault('use_confidence_weighted_voting', True)
-        spectral_config.setdefault('area_threshold_m2', 1_000_000)
 
     # Set model to evaluation mode
     model.eval()
@@ -308,8 +373,9 @@ def log_district_visualizations_to_tensorboard(
                         embeddings_np = embeddings_np[:min_len]
                     logits_np = logits_np[:min_len]
 
-                # Perform spectral clustering (先聚类再分类)
+                # Perform spectral clustering (先聚类再分类) with optional connected component separation
                 spectral_predictions = None
+                spectral_clusters_array = None
                 if enable_spectral_clustering and embeddings_np is not None and adjacency_dir is not None:
                     try:
                         # Load adjacency matrix
@@ -326,34 +392,118 @@ def log_district_visualizations_to_tensorboard(
                             if 'voroniarea' in district_buildings.columns:
                                 voronoi_areas = dict(zip(building_ids, district_buildings['voroniarea'].values))
 
-                            # Perform spectral clustering
-                            spectral_clusters, _, cluster_to_label, _ = perform_spectral_clustering_pipeline(
-                                embeddings=embeddings_np,
-                                features=clustering_features,
-                                adjacency_matrix=adjacency_matrix,
-                                gat_labels=gat_predictions,
-                                gat_logits=logits_np,
-                                building_ids=building_ids,
-                                voronoi_areas=voronoi_areas,
-                                n_clusters=None,  # Auto-detect
-                                use_confidence_weighted_voting=spectral_config['use_confidence_weighted_voting'],
-                                embedding_weight=spectral_config['embedding_weight'],
-                                feature_weight=spectral_config['feature_weight'],
-                                distance_weight=spectral_config['distance_weight'],
-                                distance_scale=spectral_config['distance_scale'],
-                                area_threshold_m2=spectral_config['area_threshold_m2'],
-                                random_state=42
-                            )
+                            # PLAN B: Connected Component Separation (mirrors inference.py logic)
+                            if use_connected_components:
+                                logger.debug(f"District {district_id}: Using connected component separation (Plan B)")
 
-                            # Map clusters to labels
-                            spectral_predictions = np.array([cluster_to_label[c] for c in spectral_clusters])
-                            logger.debug(f"District {district_id}: Spectral clustering completed, "
-                                       f"{len(np.unique(spectral_clusters))} clusters -> {len(np.unique(spectral_predictions))} labels")
+                                # Identify connected components
+                                component_labels, num_components = get_connected_components(
+                                    data_device.edge_index,
+                                    data_device.num_nodes
+                                )
+                                component_labels_np = component_labels.cpu().numpy()
+                                logger.debug(f"  Found {num_components} connected components")
+
+                                # Process each component independently
+                                component_results = []
+                                for comp_id in range(num_components):
+                                    comp_mask = (component_labels_np == comp_id)
+                                    comp_size = comp_mask.sum()
+
+                                    # Extract component data
+                                    comp_data, _ = extract_subgraph(data_device, comp_mask, building_ids)
+
+                                    # GAT forward for component
+                                    if hasattr(model, 'forward_inference'):
+                                        comp_logits, comp_embeddings = model.forward_inference(
+                                            comp_data.x, comp_data.edge_index
+                                        )
+                                    else:
+                                        comp_logits = model(comp_data.x, comp_data.edge_index)
+                                        comp_embeddings = None
+
+                                    comp_embeddings_np = comp_embeddings.cpu().numpy() if comp_embeddings is not None else None
+                                    comp_logits_np = comp_logits.cpu().numpy()
+                                    comp_gat_labels = comp_logits.argmax(dim=1).cpu().numpy()
+
+                                    # Apply spectral clustering if component is large enough
+                                    if comp_size >= min_component_size and comp_embeddings_np is not None:
+                                        comp_building_ids = [building_ids[i] for i in range(len(comp_mask)) if comp_mask[i]]
+                                        comp_clustering_features = clustering_features[comp_mask]
+                                        comp_adjacency = extract_subgraph_from_adjacency(adjacency_matrix, comp_building_ids)
+                                        comp_voronoi_areas = {bid: voronoi_areas[bid] for bid in comp_building_ids} if voronoi_areas else None
+
+                                        comp_clusters, comp_final_labels, _, _ = perform_spectral_clustering_pipeline(
+                                            embeddings=comp_embeddings_np,
+                                            features=comp_clustering_features,
+                                            adjacency_matrix=comp_adjacency,
+                                            gat_labels=comp_gat_labels,
+                                            gat_logits=comp_logits_np,
+                                            building_ids=comp_building_ids,
+                                            voronoi_areas=comp_voronoi_areas,
+                                            n_clusters=None,
+                                            use_confidence_weighted_voting=spectral_config['use_confidence_weighted_voting'],
+                                            embedding_weight=spectral_config['embedding_weight'],
+                                            feature_weight=spectral_config['feature_weight'],
+                                            distance_weight=spectral_config['distance_weight'],
+                                            distance_scale=spectral_config['distance_scale'],
+                                            random_state=42
+                                        )
+                                    else:
+                                        # Small component: majority voting
+                                        comp_clusters = np.zeros(comp_size, dtype=int)
+                                        majority_label = np.argmax(np.bincount(comp_gat_labels))
+                                        comp_final_labels = np.full(comp_size, majority_label, dtype=int)
+
+                                    component_results.append({
+                                        'component_id': comp_id,
+                                        'num_nodes': comp_size,
+                                        'embeddings': comp_embeddings_np if comp_embeddings_np is not None else np.zeros((comp_size, embeddings_np.shape[1])),
+                                        'logits': comp_logits_np,
+                                        'gat_labels': comp_gat_labels,
+                                        'cluster_assignments': comp_clusters,
+                                        'final_labels': comp_final_labels,
+                                        'node_mask': comp_mask
+                                    })
+
+                                # Merge results
+                                merged = merge_component_results(component_results, component_labels_np)
+                                spectral_clusters_array = merged['cluster_assignments']
+                                spectral_predictions = merged['final_labels']
+
+                                logger.debug(f"District {district_id}: Plan B completed, "
+                                           f"{num_components} components → {len(np.unique(spectral_clusters_array))} clusters")
+
+                            # ORIGINAL METHOD: Global spectral clustering
+                            else:
+                                spectral_clusters_result, _, cluster_to_label, _ = perform_spectral_clustering_pipeline(
+                                    embeddings=embeddings_np,
+                                    features=clustering_features,
+                                    adjacency_matrix=adjacency_matrix,
+                                    gat_labels=gat_predictions,
+                                    gat_logits=logits_np,
+                                    building_ids=building_ids,
+                                    voronoi_areas=voronoi_areas,
+                                    n_clusters=None,
+                                    use_confidence_weighted_voting=spectral_config['use_confidence_weighted_voting'],
+                                    embedding_weight=spectral_config['embedding_weight'],
+                                    feature_weight=spectral_config['feature_weight'],
+                                    distance_weight=spectral_config['distance_weight'],
+                                    distance_scale=spectral_config['distance_scale'],
+                                    random_state=42
+                                )
+
+                                spectral_clusters_array = np.array(spectral_clusters_result)
+                                spectral_predictions = np.array([cluster_to_label[c] for c in spectral_clusters_result])
+
+                                logger.debug(f"District {district_id}: Spectral clustering completed, "
+                                           f"{len(np.unique(spectral_clusters_array))} clusters -> {len(np.unique(spectral_predictions))} labels")
                         else:
                             logger.debug(f"Adjacency matrix not found: {adjacency_path}")
                     except Exception as e:
                         logger.warning(f"Spectral clustering failed for district {district_id}: {e}")
                         spectral_predictions = None
+                        spectral_clusters_array = None
 
                 # Get number of classes from data
                 num_classes = int(ground_truth.max()) + 1
@@ -365,7 +515,8 @@ def log_district_visualizations_to_tensorboard(
                     predictions=gat_predictions,
                     ground_truth=ground_truth,
                     num_classes=num_classes,
-                    spectral_predictions=spectral_predictions
+                    spectral_predictions=spectral_predictions,
+                    spectral_clusters=spectral_clusters_array
                 )
 
                 # Add to TensorBoard (HWC -> CHW format)

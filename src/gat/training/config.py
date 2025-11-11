@@ -72,13 +72,18 @@ class GATConfig:
     # Random seed
     seed: int = 42
 
+    # Loss function parameters (for handling class imbalance)
+    class_weight_smoothing: str = 'sqrt'  # Class weight smoothing: 'sqrt', 'inverse', or 'log'
+    use_focal_loss: bool = False  # Whether to use Focal Loss instead of CrossEntropy
+    focal_gamma: float = 2.0  # Focal loss gamma parameter (higher = more focus on hard examples)
+    label_smoothing: float = 0.0  # Label smoothing factor (0.0-1.0, typically 0.1)
+
     # Spectral Clustering Configuration (used during inference for spatial smoothing)
     spectral_embedding_weight: float = 0.3  # Weight for GAT embedding similarity
     spectral_feature_weight: float = 0.5  # Weight for morphological feature similarity
     spectral_distance_weight: float = 0.2  # Weight for spatial distance affinity
     spectral_distance_scale: float = 100.0  # Distance-to-affinity conversion scale (meters)
     spectral_oversample_factor: float = 1.5  # Cluster oversampling factor
-    spectral_area_threshold_m2: float = 1_000_000  # Minimum cluster area (1 km²)
     spectral_use_confidence_weighted_voting: bool = True  # Use confidence-weighted voting
     spectral_confidence_threshold_high: float = 0.8  # High confidence threshold
     spectral_confidence_threshold_low: float = 0.5  # Low confidence threshold
@@ -104,7 +109,6 @@ class GATConfig:
         weight_sum = self.spectral_embedding_weight + self.spectral_feature_weight + self.spectral_distance_weight
         assert abs(weight_sum - 1.0) < 1e-6, f"Spectral clustering weights must sum to 1.0, got {weight_sum:.4f}"
         assert self.spectral_distance_scale > 0, "spectral_distance_scale must be positive"
-        assert self.spectral_area_threshold_m2 > 0, "spectral_area_threshold_m2 must be positive"
         assert 0 < self.spectral_confidence_threshold_low < self.spectral_confidence_threshold_high <= 1.0, \
             "Confidence thresholds must satisfy 0 < low < high <= 1.0"
 
@@ -203,6 +207,12 @@ class GATConfig:
             # Other parameters
             'seed': config_dict.get('seed'),
             'device': config_dict.get('device'),
+
+            # Loss function parameters
+            'class_weight_smoothing': data_params.get('class_weight_smoothing'),
+            'use_focal_loss': config_dict.get('focal_loss', {}).get('enabled'),
+            'focal_gamma': config_dict.get('focal_loss', {}).get('gamma'),
+            'label_smoothing': config_dict.get('strategy', {}).get('label_smoothing'),
         }
 
         # Spectral Clustering parameters (for inference stage)
@@ -213,7 +223,6 @@ class GATConfig:
             'spectral_distance_weight': spectral_params.get('distance_weight'),
             'spectral_distance_scale': spectral_params.get('distance_scale'),
             'spectral_oversample_factor': spectral_params.get('oversample_factor'),
-            'spectral_area_threshold_m2': spectral_params.get('area_threshold_m2'),
             'spectral_use_confidence_weighted_voting': spectral_params.get('use_confidence_weighted_voting'),
             'spectral_confidence_threshold_high': spectral_params.get('confidence_threshold_high'),
             'spectral_confidence_threshold_low': spectral_params.get('confidence_threshold_low'),

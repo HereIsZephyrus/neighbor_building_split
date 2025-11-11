@@ -385,130 +385,6 @@ def estimate_optimal_clusters(
     return optimal_k
 
 
-def merge_small_clusters(
-    cluster_assignments: np.ndarray,
-    building_ids: List,
-    voronoi_areas: Dict[int, float],
-    adjacency_matrix: pd.DataFrame,
-    gat_labels: np.ndarray,
-    cluster_to_label: Dict[int, int],
-    area_threshold_m2: float = 1_000_000
-) -> Tuple[np.ndarray, Dict[int, int]]:
-    """
-    Merge clusters whose total voronoi area is below threshold with neighboring clusters.
-
-    Args:
-        cluster_assignments: Current cluster assignments (N,)
-        building_ids: List of building IDs corresponding to cluster assignments
-        voronoi_areas: Dictionary mapping building ID to voronoi area (m²)
-        adjacency_matrix: Distance-based adjacency matrix (N, N) for spatial relationships
-        gat_labels: GAT predicted labels (N,)
-        cluster_to_label: Current mapping from cluster ID to GAT label
-        area_threshold_m2: Area threshold in square meters (default: 1km² = 1,000,000 m²)
-
-    Returns:
-        merged_assignments: Updated cluster assignments after merging (N,)
-        merged_cluster_to_label: Updated cluster-to-label mapping
-    """
-    if voronoi_areas is None or len(voronoi_areas) == 0:
-        logger.warning("No voronoi area data provided, skipping cluster merging")
-        return cluster_assignments, cluster_to_label
-
-    logger.info("Starting cluster merging with area threshold %.2f km²", area_threshold_m2 / 1_000_000)
-
-    # Create mapping from building ID to cluster
-    building_to_cluster = {bid: cluster for bid, cluster in zip(building_ids, cluster_assignments)}
-
-    # Calculate total area per cluster
-    cluster_areas = {}
-    unique_clusters = np.unique(cluster_assignments)
-
-    for cluster_id in unique_clusters:
-        # Find all buildings in this cluster
-        cluster_buildings = [bid for bid, cid in building_to_cluster.items() if cid == cluster_id]
-        # Sum their voronoi areas
-        total_area = sum(voronoi_areas.get(bid, 0.0) for bid in cluster_buildings)
-        cluster_areas[int(cluster_id)] = total_area
-
-    logger.debug("Cluster areas (m²): %s", {k: f"{v:.2f}" for k, v in cluster_areas.items()})
-
-    # Identify small clusters
-    small_clusters = [cid for cid, area in cluster_areas.items() if area < area_threshold_m2]
-    logger.info("Found %d clusters below threshold (%.2f km²): %s",
-                len(small_clusters), area_threshold_m2 / 1_000_000, small_clusters)
-
-    if not small_clusters:
-        logger.info("No small clusters to merge")
-        return cluster_assignments, cluster_to_label
-
-    # Create adjacency graph of clusters (which clusters are neighbors)
-    # Use the adjacency matrix to determine which buildings are connected
-    cluster_neighbors = {int(cid): set() for cid in unique_clusters}
-
-    # Build cluster adjacency from building adjacency matrix
-    adjacency_values = adjacency_matrix.values
-    adjacency_row_ids = list(adjacency_matrix.index)
-    adjacency_col_ids = list(adjacency_matrix.columns)
-
-    for i, row_id in enumerate(adjacency_row_ids):
-        if row_id not in building_to_cluster:
-            continue
-        cluster_i = int(building_to_cluster[row_id])
-
-        for j, col_id in enumerate(adjacency_col_ids):
-            if col_id not in building_to_cluster:
-                continue
-            cluster_j = int(building_to_cluster[col_id])
-
-            # If buildings are adjacent (non-zero distance) and in different clusters
-            if cluster_i != cluster_j and adjacency_values[i, j] > 0:
-                cluster_neighbors[cluster_i].add(cluster_j)
-                cluster_neighbors[cluster_j].add(cluster_i)
-
-    # Merge small clusters with neighboring clusters of same GAT label
-    merged_assignments = cluster_assignments.copy()
-    merge_mapping = {}  # Map old cluster ID to new cluster ID
-
-    for small_cluster in sorted(small_clusters):
-        # Get GAT label for this cluster
-        small_cluster_label = cluster_to_label.get(small_cluster)
-
-        # Find neighboring clusters with same GAT label
-        neighbors = cluster_neighbors.get(small_cluster, set())
-        same_label_neighbors = [
-            n for n in neighbors
-            if cluster_to_label.get(n) == small_cluster_label and n not in small_clusters
-        ]
-
-        if same_label_neighbors:
-            # Merge with the largest neighboring cluster with same label
-            target_cluster = max(same_label_neighbors, key=lambda c: cluster_areas.get(c, 0))
-            merge_mapping[small_cluster] = target_cluster
-
-            logger.info(
-                "Merging cluster %d (area=%.2f km², label=%d) into cluster %d (area=%.2f km²)",
-                small_cluster, cluster_areas.get(small_cluster, 0) / 1_000_000,
-                small_cluster_label, target_cluster, cluster_areas.get(target_cluster, 0) / 1_000_000
-            )
-        else:
-            logger.warning(
-                "Cluster %d (area=%.2f km², label=%d) has no suitable neighbors for merging",
-                small_cluster, cluster_areas.get(small_cluster, 0) / 1_000_000, small_cluster_label
-            )
-
-    # Apply merging
-    for old_cluster, new_cluster in merge_mapping.items():
-        merged_assignments[cluster_assignments == old_cluster] = new_cluster
-
-    # Update cluster_to_label mapping (remove merged clusters)
-    merged_cluster_to_label = {k: v for k, v in cluster_to_label.items() if k not in merge_mapping}
-
-    logger.info("Cluster merging completed: %d clusters merged, %d clusters remaining",
-                len(merge_mapping), len(np.unique(merged_assignments)))
-
-    return merged_assignments, merged_cluster_to_label
-
-
 def perform_spectral_clustering_pipeline(
     embeddings: np.ndarray,
     features: np.ndarray,
@@ -523,7 +399,6 @@ def perform_spectral_clustering_pipeline(
     feature_weight: float = 0.5,
     distance_weight: float = 0.2,
     distance_scale: float = 1.0,
-    area_threshold_m2: float = 1_000_000,
     random_state: int = 42
 ) -> Tuple[np.ndarray, np.ndarray, dict, np.ndarray]:
     """
@@ -533,7 +408,6 @@ def perform_spectral_clustering_pipeline(
     1. Compute affinity matrix combining embeddings, morphological features, and spatial distance
     2. Perform spectral clustering to group spatially similar buildings
     3. Assign GAT labels to clusters using (optionally confidence-weighted) majority voting
-    4. Merge small clusters based on area threshold
 
     The key innovation is the confidence-weighted voting: GAT predictions with high
     confidence have more influence, preventing uncertain predictions from dominating.
@@ -543,8 +417,8 @@ def perform_spectral_clustering_pipeline(
         features: Morphological clustering features (N, D_feat) - shape, size, orientation
         adjacency_matrix: Distance-based adjacency (N, N) - spatial relationships
         gat_labels: GAT predicted labels (N,) - initial classification from GAT
-        building_ids: List of building IDs (for area-based merging)
-        voronoi_areas: Dictionary mapping building ID to voronoi area in m² (for area-based merging)
+        building_ids: List of building IDs (optional, for logging)
+        voronoi_areas: Dictionary mapping building ID to voronoi area in m² (optional, for logging)
         n_clusters: Number of clusters (auto-estimate with oversampling if None)
         gat_logits: GAT classification logits (N, num_classes) - for confidence weighting
         use_confidence_weighted_voting: Whether to use confidence-weighted voting (default True)
@@ -552,11 +426,10 @@ def perform_spectral_clustering_pipeline(
         feature_weight: Weight for morphological feature similarity (default 0.5)
         distance_weight: Weight for distance-based adjacency (default 0.2)
         distance_scale: Scale factor for distance-to-affinity conversion in meters (default 1.0)
-        area_threshold_m2: Minimum cluster area threshold in square meters (default 1 km²)
         random_state: Random seed for reproducibility
 
     Returns:
-        cluster_assignments: Final cluster assignments after merging (N,)
+        cluster_assignments: Final cluster assignments (N,)
         final_labels: Final labels after assigning GAT labels (N,)
         cluster_to_label: Mapping from cluster ID to GAT label (dict)
         affinity_matrix: Computed affinity matrix (N, N)
@@ -605,26 +478,6 @@ def perform_spectral_clustering_pipeline(
             cluster_assignments=cluster_assignments,
             gat_labels=gat_labels
         )
-
-    # Step 5: Merge small clusters based on voronoi area threshold
-    # This ensures spatially significant clusters while maintaining spatial consistency
-    if building_ids is not None and voronoi_areas is not None:
-        logger.info("Merging small clusters (threshold: %.2f km²)", area_threshold_m2 / 1_000_000)
-        cluster_assignments, cluster_to_label = merge_small_clusters(
-            cluster_assignments=cluster_assignments,
-            building_ids=building_ids,
-            voronoi_areas=voronoi_areas,
-            adjacency_matrix=adjacency_matrix,
-            gat_labels=gat_labels,
-            cluster_to_label=cluster_to_label,
-            area_threshold_m2=area_threshold_m2
-        )
-
-        # Update final labels after merging
-        final_labels = np.array([cluster_to_label[int(c)] for c in cluster_assignments])
-        logger.info("Updated final labels after cluster merging")
-    else:
-        logger.info("Skipping cluster merging (no building IDs or voronoi area data provided)")
 
     logger.info("Spectral clustering pipeline completed successfully: %d final clusters",
                 len(np.unique(cluster_assignments)))

@@ -62,7 +62,6 @@ spectral_clustering:
 
   # Clustering parameters
   oversample_factor:   # Multiply estimated clusters by this factor (over-segment then merge)
-  area_threshold_m2:   # Minimum cluster area threshold in square meters (1 km²)
 
   # Majority voting strategy
   use_confidence_weighted_voting:  # Use GAT confidence scores for weighted voting

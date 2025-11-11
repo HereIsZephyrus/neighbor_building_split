@@ -21,6 +21,7 @@ from ..utils import get_logger
 from ..utils.metrics import compute_f1_scores
 from .config import GATConfig
 from .smooth_loss import edge_smoothness_loss
+from .focal_loss import create_loss_function
 from .train_utils import (
     save_checkpoint,
     load_checkpoint,
@@ -142,16 +143,35 @@ class Trainer:
 
         # Compute class weights to handle class imbalance
         logger.info("Computing class weights from training data...")
+
+        # Get class weight smoothing from config (default: sqrt)
+        weight_smoothing = getattr(config, 'class_weight_smoothing', 'sqrt')
         class_weights = compute_class_weights(
             train_data_list, 
             num_classes=config.num_classes,
-            smoothing='sqrt'  # Use sqrt smoothing for moderate compensation
+            smoothing=weight_smoothing
         )
         class_weights = class_weights.to(self.device)
 
-        # Loss function with class weights
-        self.criterion = nn.CrossEntropyLoss(weight=class_weights)
-        logger.info("Using weighted CrossEntropyLoss to handle class imbalance")
+        # Create loss function (supports Focal Loss and Label Smoothing)
+        use_focal_loss = getattr(config, 'use_focal_loss', False)
+        focal_gamma = getattr(config, 'focal_gamma', 2.0)
+        label_smoothing = getattr(config, 'label_smoothing', 0.0)
+
+        self.criterion = create_loss_function(
+            num_classes=config.num_classes,
+            class_weights=class_weights,
+            focal_loss=use_focal_loss,
+            focal_gamma=focal_gamma,
+            label_smoothing=label_smoothing
+        )
+
+        if use_focal_loss:
+            logger.info(f"Using Focal Loss (gamma={focal_gamma}, label_smoothing={label_smoothing}) to handle class imbalance")
+        elif label_smoothing > 0:
+            logger.info(f"Using CrossEntropyLoss with label smoothing={label_smoothing}")
+        else:
+            logger.info("Using weighted CrossEntropyLoss to handle class imbalance")
 
         # Early stopping
         self.early_stopping = EarlyStopping(

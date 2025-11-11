@@ -67,7 +67,7 @@ class GATConfig:
 
     # Visualization
     enable_visualization: bool = True  # Enable district visualization
-    max_visualize_districts: int = 5  # Maximum districts to visualize
+    max_visualize_districts: int = 9  # Maximum districts to visualize
 
     # Random seed
     seed: int = 42

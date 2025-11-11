@@ -14,7 +14,7 @@ from ..utils.feature_extractor import extract_gat_features
 from ..utils.graph_utils import similarity_matrix_to_edge_index
 from ..utils.logger import get_logger
 
-logger = get_logger()
+logger = get_logger(__name__)
 
 
 def load_district_graph(
@@ -77,11 +77,28 @@ def load_district_graph(
 
     logger.debug(f"Filtered buildings: {len(buildings_gdf)} buildings")
 
-    # Extract GAT features
+    # Extract GAT features (now includes neighdis placeholder)
     features = extract_gat_features(buildings_gdf)
 
-    # Calculate degree feature (will be added as 5th feature)
-    # For now we just get the base 4 features, degree will be added later
+    # Calculate average distance to neighbors from adjacency matrix
+    # Replace the neighdis column (4th column, index 3) with computed values
+    avg_neighbor_distances = []
+    for i in range(len(sim_matrix)):
+        # Get non-zero distances for this building (its neighbors)
+        row = sim_matrix.iloc[i]
+        neighbor_distances = row[row > 0].values  # Get non-zero values
+
+        if len(neighbor_distances) > 0:
+            avg_dist = np.mean(neighbor_distances)
+        else:
+            avg_dist = 50.0  # Default value for isolated buildings
+
+        avg_neighbor_distances.append(avg_dist)
+
+    # Replace the neighdis column (assuming it's the 4th feature)
+    features[:, 3] = np.array(avg_neighbor_distances)
+    logger.debug(f"Computed average neighbor distances (neighdis): min={min(avg_neighbor_distances):.2f}, "
+                f"max={max(avg_neighbor_distances):.2f}, mean={np.mean(avg_neighbor_distances):.2f}")
 
     # Normalize features
     if normalize_features:

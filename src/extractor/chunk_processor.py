@@ -10,7 +10,7 @@ from .utils.adjacency import create_adjacency_matrix
 from .chunker import split_district_adaptive
 from .chunk_merger import merge_voronoi_chunks, merge_adjacency_matrices, stitch_rasters
 
-logger = get_logger()
+logger = get_logger(__name__)
 
 
 def _calculate_optimal_chunks(

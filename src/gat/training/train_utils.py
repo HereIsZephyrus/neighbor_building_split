@@ -7,7 +7,7 @@ import torch
 import torch.nn as nn
 from ..utils import get_logger, compute_metrics
 
-logger = get_logger()
+logger = get_logger(__name__)
 
 
 def save_checkpoint(

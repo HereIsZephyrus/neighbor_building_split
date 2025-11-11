@@ -9,7 +9,7 @@ from affine import Affine
 from .utils.logger import get_logger
 from .utils.adjacency import find_adjacent_voronoi_regions, compute_building_distance, create_building_id_mapping
 
-logger = get_logger()
+logger = get_logger(__name__)
 
 
 def merge_voronoi_chunks(

@@ -4,7 +4,7 @@ from .models import GAT
 from .training import Trainer
 from .utils import get_logger
 
-logger = get_logger()
+logger = get_logger(__name__)
 
 def train_final_model(config, dataset, args):
     """Train final model on all data without validation split.

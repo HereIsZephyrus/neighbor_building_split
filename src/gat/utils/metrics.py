@@ -9,7 +9,7 @@ import seaborn as sns
 
 from .logger import get_logger
 
-logger = get_logger()
+logger = get_logger(__name__)
 
 
 def node_classification_accuracy(

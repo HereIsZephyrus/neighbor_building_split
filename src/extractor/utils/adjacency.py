@@ -7,7 +7,7 @@ import pandas as pd
 import geopandas as gpd
 from ..utils.logger import get_logger
 
-logger = get_logger()
+logger = get_logger(__name__)
 
 
 def find_adjacent_voronoi_regions(voronoi_gdf: gpd.GeoDataFrame) -> List[Tuple[int, int]]:

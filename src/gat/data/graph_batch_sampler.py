@@ -7,7 +7,7 @@ from typing import List, Optional
 
 from ..utils.logger import get_logger
 
-logger = get_logger()
+logger = get_logger(__name__)
 
 
 def create_neighbor_loader(

@@ -13,7 +13,7 @@ from .gat_layer import GATConv
 from ..utils.logger import get_logger
 from ..utils.graph_utils import global_pool
 
-logger = get_logger()
+logger = get_logger(__name__)
 
 
 class GAT(nn.Module):

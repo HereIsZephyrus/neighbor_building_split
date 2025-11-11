@@ -5,7 +5,7 @@ import geopandas as gpd
 from shapely.geometry import box
 from ..utils.logger import get_logger
 
-logger = get_logger()
+logger = get_logger(__name__)
 
 
 class ShapefileReader:

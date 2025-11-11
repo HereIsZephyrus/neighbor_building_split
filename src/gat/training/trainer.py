@@ -6,6 +6,7 @@ Following pytorch-GAT training script structure.
 from typing import List, Optional, Dict
 from pathlib import Path
 from datetime import datetime
+import numpy as np
 import torch
 import torch.nn as nn
 from torch.optim import Adam
@@ -17,6 +18,7 @@ from torch.utils.tensorboard import SummaryWriter
 from ..models import GAT
 from ..data import create_neighbor_loader, should_use_neighbor_sampling
 from ..utils import get_logger
+from ..utils.metrics import compute_f1_scores
 from .config import GATConfig
 from .smooth_loss import edge_smoothness_loss
 from .train_utils import (
@@ -34,7 +36,58 @@ from .tensorborad_utils import (
     log_district_visualizations_to_tensorboard
 )
 
-logger = get_logger()
+logger = get_logger(__name__)
+
+
+def compute_class_weights(data_list: List[Data], num_classes: int, smoothing: str = 'sqrt') -> torch.Tensor:
+    """
+    Compute class weights from data to handle class imbalance.
+
+    Args:
+        data_list: List of graph data objects
+        num_classes: Number of classes
+        smoothing: Weighting strategy ('inverse', 'sqrt', or 'log')
+                  - 'inverse': weight = total / (num_classes * count) - strong compensation
+                  - 'sqrt': weight = sqrt(total / count) - moderate compensation (recommended)
+                  - 'log': weight = log(total / count) - mild compensation
+
+    Returns:
+        Tensor of class weights (num_classes,)
+    """
+    # Collect all labels
+    all_labels = []
+    for data in data_list:
+        all_labels.extend(data.y.cpu().numpy())
+
+    labels = np.array(all_labels)
+
+    # Count samples per class
+    class_counts = np.bincount(labels, minlength=num_classes)
+    total = len(labels)
+
+    # Avoid division by zero
+    class_counts = np.maximum(class_counts, 1)
+
+    # Compute weights based on strategy
+    if smoothing == 'inverse':
+        weights = total / (num_classes * class_counts)
+    elif smoothing == 'sqrt':
+        weights = np.sqrt(total / class_counts)
+    elif smoothing == 'log':
+        weights = np.log1p(total / class_counts)
+    else:
+        raise ValueError(f"Unknown smoothing strategy: {smoothing}")
+
+    # Log class distribution
+    logger.info("=" * 60)
+    logger.info("Class Distribution Analysis:")
+    logger.info("-" * 60)
+    for i in range(num_classes):
+        percentage = (class_counts[i] / total) * 100
+        logger.info(f"  Class {i}: {class_counts[i]:6d} samples ({percentage:5.2f}%) -> weight: {weights[i]:.4f}")
+    logger.info("=" * 60)
+
+    return torch.FloatTensor(weights)
 
 
 class Trainer:
@@ -87,8 +140,18 @@ class Trainer:
             patience=config.patience // 2
         )
 
-        # Loss function
-        self.criterion = nn.CrossEntropyLoss()  # Node classification
+        # Compute class weights to handle class imbalance
+        logger.info("Computing class weights from training data...")
+        class_weights = compute_class_weights(
+            train_data_list, 
+            num_classes=config.num_classes,
+            smoothing='sqrt'  # Use sqrt smoothing for moderate compensation
+        )
+        class_weights = class_weights.to(self.device)
+
+        # Loss function with class weights
+        self.criterion = nn.CrossEntropyLoss(weight=class_weights)
+        logger.info("Using weighted CrossEntropyLoss to handle class imbalance")
 
         # Early stopping
         self.early_stopping = EarlyStopping(
@@ -115,10 +178,14 @@ class Trainer:
             'train_acc': [],
             'train_cls_loss': [],      # Classification loss component
             'train_smooth_loss': [],   # Smoothness loss component
+            'train_macro_f1': [],      # Macro F1 score
+            'train_micro_f1': [],      # Micro F1 score
             'val_loss': [],
             'val_acc': [],
             'val_cls_loss': [],        # Classification loss component
             'val_smooth_loss': [],     # Smoothness loss component
+            'val_macro_f1': [],        # Macro F1 score
+            'val_micro_f1': [],        # Micro F1 score
             'lr': []
         }
 
@@ -142,6 +209,10 @@ class Trainer:
         total_smooth_loss = 0
         total_correct = 0
         total_samples = 0
+
+        # Collect predictions and labels for F1 computation
+        all_predictions = []
+        all_labels = []
 
         # Train on each graph
         for data in self.train_data_list:
@@ -230,6 +301,10 @@ class Trainer:
                         total_cls_loss += loss_cls.item() * batch.batch_size
                         total_smooth_loss += loss_smooth.item() * batch.batch_size
 
+                        # Collect predictions and labels for F1
+                        all_predictions.append(pred.cpu())
+                        all_labels.append(batch.y[:batch.batch_size].cpu())
+
                 # Final optimizer step if needed
                 if batch_count % self.config.gradient_accumulation_steps != 0:
                     # Check for NaN/Inf in gradients
@@ -308,17 +383,31 @@ class Trainer:
                     total_cls_loss += loss_cls.item() * data.num_nodes
                     total_smooth_loss += loss_smooth.item() * data.num_nodes
 
+                    # Collect predictions and labels for F1
+                    all_predictions.append(pred.cpu())
+                    all_labels.append(data.y.cpu())
+
         # Average metrics
         avg_loss = total_loss / total_samples if total_samples > 0 else 0
         avg_acc = total_correct / total_samples if total_samples > 0 else 0
         avg_cls_loss = total_cls_loss / total_samples if total_samples > 0 else 0
         avg_smooth_loss = total_smooth_loss / total_samples if total_samples > 0 else 0
 
+        # Compute F1 scores
+        if all_predictions and all_labels:
+            all_preds_tensor = torch.cat(all_predictions)
+            all_labels_tensor = torch.cat(all_labels)
+            macro_f1, micro_f1 = compute_f1_scores(all_preds_tensor, all_labels_tensor)
+        else:
+            macro_f1, micro_f1 = 0.0, 0.0
+
         metrics = {
             'loss': avg_loss,
             'accuracy': avg_acc,
             'cls_loss': avg_cls_loss,
-            'smooth_loss': avg_smooth_loss
+            'smooth_loss': avg_smooth_loss,
+            'macro_f1': macro_f1,
+            'micro_f1': micro_f1
         }
 
         return metrics
@@ -341,6 +430,10 @@ class Trainer:
         total_smooth_loss = 0
         total_correct = 0
         total_samples = 0
+
+        # Collect predictions and labels for F1 computation
+        all_predictions = []
+        all_labels = []
 
         for data in self.val_data_list:
             data = data.to(self.device)
@@ -373,17 +466,31 @@ class Trainer:
             total_cls_loss += loss_cls.item() * data.num_nodes
             total_smooth_loss += loss_smooth.item() * data.num_nodes
 
+            # Collect predictions and labels for F1
+            all_predictions.append(pred.cpu())
+            all_labels.append(data.y.cpu())
+
         # Average metrics
         avg_loss = total_loss / total_samples if total_samples > 0 else 0
         avg_acc = total_correct / total_samples if total_samples > 0 else 0
         avg_cls_loss = total_cls_loss / total_samples if total_samples > 0 else 0
         avg_smooth_loss = total_smooth_loss / total_samples if total_samples > 0 else 0
 
+        # Compute F1 scores
+        if all_predictions and all_labels:
+            all_preds_tensor = torch.cat(all_predictions)
+            all_labels_tensor = torch.cat(all_labels)
+            macro_f1, micro_f1 = compute_f1_scores(all_preds_tensor, all_labels_tensor)
+        else:
+            macro_f1, micro_f1 = 0.0, 0.0
+
         metrics = {
             'loss': avg_loss,
             'accuracy': avg_acc,
             'cls_loss': avg_cls_loss,
-            'smooth_loss': avg_smooth_loss
+            'smooth_loss': avg_smooth_loss,
+            'macro_f1': macro_f1,
+            'micro_f1': micro_f1
         }
 
         return metrics
@@ -429,6 +536,8 @@ class Trainer:
             self.history['train_acc'].append(train_metrics['accuracy'])
             self.history['train_cls_loss'].append(train_metrics['cls_loss'])
             self.history['train_smooth_loss'].append(train_metrics['smooth_loss'])
+            self.history['train_macro_f1'].append(train_metrics['macro_f1'])
+            self.history['train_micro_f1'].append(train_metrics['micro_f1'])
             self.history['lr'].append(current_lr)
 
             if val_metrics:
@@ -436,6 +545,8 @@ class Trainer:
                 self.history['val_acc'].append(val_metrics['accuracy'])
                 self.history['val_cls_loss'].append(val_metrics['cls_loss'])
                 self.history['val_smooth_loss'].append(val_metrics['smooth_loss'])
+                self.history['val_macro_f1'].append(val_metrics['macro_f1'])
+                self.history['val_micro_f1'].append(val_metrics['micro_f1'])
 
             # TensorBoard logging
             if self.writer is not None:
@@ -512,7 +623,9 @@ class Trainer:
                         tag='train_final',
                         max_districts=self.config.max_visualize_districts,
                         device=str(self.device),
-                        district_path=Path(self.config.district_path) if hasattr(self.config, 'district_path') else None
+                        district_path=Path(self.config.district_path) if hasattr(self.config, 'district_path') else None,
+                        adjacency_dir=Path(self.config.adjacency_dir) if hasattr(self.config, 'adjacency_dir') else None,
+                        enable_spectral_clustering=True
                     )
                 except Exception as e:
                     logger.error(f"Failed to generate training visualizations: {e}", exc_info=True)
@@ -529,7 +642,9 @@ class Trainer:
                         tag='val_final',
                         max_districts=self.config.max_visualize_districts,
                         device=str(self.device),
-                        district_path=Path(self.config.district_path) if hasattr(self.config, 'district_path') else None
+                        district_path=Path(self.config.district_path) if hasattr(self.config, 'district_path') else None,
+                        adjacency_dir=Path(self.config.adjacency_dir) if hasattr(self.config, 'adjacency_dir') else None,
+                        enable_spectral_clustering=True
                     )
                 except Exception as e:
                     logger.error(f"Failed to generate validation visualizations: {e}", exc_info=True)

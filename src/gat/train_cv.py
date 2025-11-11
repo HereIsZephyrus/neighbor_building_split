@@ -17,7 +17,7 @@ except ImportError:
     MPI_AVAILABLE = False
     MPI = None
 
-logger = get_logger()
+logger = get_logger(__name__)
 
 def train_cross_validation_mpi(config, dataset, args):
     """Train using K-fold cross-validation with MPI parallelization.
@@ -51,23 +51,20 @@ def train_cross_validation_mpi(config, dataset, args):
     # Prepare data
     data_list = [dataset.get(i) for i in range(len(dataset))]
 
-    # Create shared TensorBoard writer (all ranks write to same directory)
-    shared_writer = None
-    tensorboard_dir = None
+    # Create TensorBoard writers for each fold (to avoid write conflicts)
+    # Each rank will create a writer when processing its assigned fold
+    shared_tensorboard_base_dir = None
     if config.enable_tensorboard:
-        # Rank 0 creates the directory and broadcasts the path
+        # Rank 0 creates the base directory and broadcasts the path
         if rank == 0:
             timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
-            tensorboard_dir = Path(config.log_dir) / f"{config.model_identifier}_cv_{timestamp}"
-            tensorboard_dir.mkdir(parents=True, exist_ok=True)
-            tensorboard_dir = str(tensorboard_dir)
-        
-        # Broadcast tensorboard directory to all ranks
-        tensorboard_dir = comm.bcast(tensorboard_dir, root=0)
-        
-        # All ranks create their own writer to the same directory
-        shared_writer = SummaryWriter(log_dir=tensorboard_dir)
-        logger.info("Rank %d: TensorBoard logging to %s", rank, tensorboard_dir)
+            shared_tensorboard_base_dir = Path(config.log_dir) / f"{config.model_identifier}_cv_{timestamp}"
+            shared_tensorboard_base_dir.mkdir(parents=True, exist_ok=True)
+            shared_tensorboard_base_dir = str(shared_tensorboard_base_dir)
+
+        # Broadcast tensorboard base directory to all ranks
+        shared_tensorboard_base_dir = comm.bcast(shared_tensorboard_base_dir, root=0)
+        logger.info("Rank %d: TensorBoard base directory: %s", rank, shared_tensorboard_base_dir)
 
     # Each rank processes specific folds
     fold_results = []
@@ -81,6 +78,14 @@ def train_cross_validation_mpi(config, dataset, args):
         logger.info("Rank %d: Training Fold %d/%d", rank, fold_idx, n_folds)
         logger.info("=" * 80)
         logger.info("Train: %d districts, Val: %d districts", len(train_data), len(val_data))
+
+        # Create fold-specific TensorBoard writer (避免写入冲突)
+        fold_writer = None
+        if shared_tensorboard_base_dir is not None:
+            fold_log_dir = Path(shared_tensorboard_base_dir) / f"fold{fold_idx}"
+            fold_log_dir.mkdir(parents=True, exist_ok=True)
+            fold_writer = SummaryWriter(log_dir=str(fold_log_dir))
+            logger.info("Rank %d: Fold %d TensorBoard logging to %s", rank, fold_idx, fold_log_dir)
 
         # Initialize model for this fold
         logger.info("Initializing model for fold %d...", fold_idx)
@@ -136,23 +141,28 @@ def train_cross_validation_mpi(config, dataset, args):
             })
 
             # Generate visualizations for this fold (each rank visualizes its own fold)
-            if shared_writer is not None:
+            if fold_writer is not None:
                 logger.info("Rank %d: Generating visualizations for fold %d...", rank, fold_idx)
+                logger.info("Rank %d: Fold writer directory: %s", rank, fold_writer.log_dir)
 
                 # Visualize training data
                 if train_data:
                     try:
-                        max_visualize = getattr(fold_config, 'max_visualize_districts', 5)
+                        max_visualize = getattr(fold_config, 'max_visualize_districts', 9)
+                        logger.info("Rank %d: Fold %d - visualizing %d training districts", 
+                                   rank, fold_idx, min(max_visualize, len(train_data)))
                         log_district_visualizations_to_tensorboard(
-                            writer=shared_writer,
+                            writer=fold_writer,
                             model=model,
                             data_list=train_data[:max_visualize],
                             building_path=Path(fold_config.building_path),
                             epoch=fold_idx,
-                            tag=f'fold{fold_idx}_train',
+                            tag=f'train',
                             max_districts=max_visualize,
                             device=fold_config.device,
-                            district_path=Path(fold_config.district_path) if hasattr(fold_config, 'district_path') else None
+                            district_path=Path(fold_config.district_path) if hasattr(fold_config, 'district_path') else None,
+                            adjacency_dir=Path(fold_config.adjacency_dir) if hasattr(fold_config, 'adjacency_dir') else None,
+                            enable_spectral_clustering=True
                         )
                         logger.info("Rank %d: Completed training visualizations for fold %d", rank, fold_idx)
                     except Exception as e:
@@ -162,22 +172,33 @@ def train_cross_validation_mpi(config, dataset, args):
                 # Visualize validation data
                 if val_data:
                     try:
-                        max_visualize = getattr(fold_config, 'max_visualize_districts', 5)
+                        max_visualize = getattr(fold_config, 'max_visualize_districts', 9)
+                        logger.info("Rank %d: Fold %d - visualizing %d validation districts", 
+                                   rank, fold_idx, min(max_visualize, len(val_data)))
                         log_district_visualizations_to_tensorboard(
-                            writer=shared_writer,
+                            writer=fold_writer,
                             model=model,
                             data_list=val_data[:max_visualize],
                             building_path=Path(fold_config.building_path),
                             epoch=fold_idx,
-                            tag=f'fold{fold_idx}_val',
+                            tag=f'val',
                             max_districts=max_visualize,
                             device=fold_config.device,
-                            district_path=Path(fold_config.district_path) if hasattr(fold_config, 'district_path') else None
+                            district_path=Path(fold_config.district_path) if hasattr(fold_config, 'district_path') else None,
+                            adjacency_dir=Path(fold_config.adjacency_dir) if hasattr(fold_config, 'adjacency_dir') else None,
+                            enable_spectral_clustering=True
                         )
                         logger.info("Rank %d: Completed validation visualizations for fold %d", rank, fold_idx)
                     except Exception as e:
                         logger.error("Rank %d: Failed to generate validation visualizations for fold %d: %s", 
                                    rank, fold_idx, e, exc_info=True)
+
+            # Close fold-specific writer
+            if fold_writer is not None:
+                fold_writer.flush()
+                logger.info("Rank %d: Flushed fold %d writer", rank, fold_idx)
+                fold_writer.close()
+                logger.info("Rank %d: Closed fold %d writer", rank, fold_idx)
 
         except Exception as exc:
             logger.error("Rank %d: Training failed for fold %d: %s", rank, fold_idx, exc, exc_info=True)
@@ -200,8 +221,20 @@ def train_cross_validation_mpi(config, dataset, args):
         # Sort by fold number
         all_results.sort(key=lambda x: x['fold'])
 
+        # Create a summary writer for cross-validation statistics (only on rank 0)
+        summary_writer = None
+        if shared_tensorboard_base_dir is not None:
+            summary_log_dir = Path(shared_tensorboard_base_dir) / "summary"
+            summary_log_dir.mkdir(parents=True, exist_ok=True)
+            summary_writer = SummaryWriter(log_dir=str(summary_log_dir))
+            logger.info("Rank 0: Cross-validation summary TensorBoard logging to %s", summary_log_dir)
+            logger.info("Rank 0: Processing %d fold results for summary", len(all_results))
+        else:
+            logger.warning("Rank 0: shared_tensorboard_base_dir is None, skipping summary writer creation")
+
         # Log fold results to TensorBoard
-        if shared_writer is not None:
+        if summary_writer is not None:
+            logger.info("Rank 0: Writing fold results to summary...")
             for result in all_results:
                 if 'error' in result:
                     continue
@@ -217,16 +250,16 @@ def train_cross_validation_mpi(config, dataset, args):
                 val_accs = history.get('val_acc', [])
 
                 for epoch_idx, (train_loss, train_acc) in enumerate(zip(train_losses, train_accs), 1):
-                    shared_writer.add_scalar(f'fold{fold_idx}/train_loss', train_loss, epoch_idx)
-                    shared_writer.add_scalar(f'fold{fold_idx}/train_acc', train_acc, epoch_idx)
+                    summary_writer.add_scalar(f'fold{fold_idx}/train_loss', train_loss, epoch_idx)
+                    summary_writer.add_scalar(f'fold{fold_idx}/train_acc', train_acc, epoch_idx)
 
                 val_interval = config.val_interval
                 for val_idx, (val_loss, val_acc) in enumerate(zip(val_losses, val_accs)):
                     epoch_idx = (val_idx + 1) * val_interval
-                    shared_writer.add_scalar(f'fold{fold_idx}/val_loss', val_loss, epoch_idx)
-                    shared_writer.add_scalar(f'fold{fold_idx}/val_acc', val_acc, epoch_idx)
+                    summary_writer.add_scalar(f'fold{fold_idx}/val_loss', val_loss, epoch_idx)
+                    summary_writer.add_scalar(f'fold{fold_idx}/val_acc', val_acc, epoch_idx)
 
-                shared_writer.add_scalar('cross_validation/best_val_acc_by_fold', best_val_acc, fold_idx)
+                summary_writer.add_scalar('cross_validation/best_val_acc_by_fold', best_val_acc, fold_idx)
 
         # Report summary
         logger.info("=" * 80)
@@ -246,9 +279,9 @@ def train_cross_validation_mpi(config, dataset, args):
             logger.info("=" * 80)
 
             # Log summary to TensorBoard
-            if shared_writer is not None:
-                shared_writer.add_scalar('cross_validation/average_val_acc', avg_acc, 0)
-                shared_writer.add_scalar('cross_validation/std_val_acc', std_acc, 0)
+            if summary_writer is not None:
+                summary_writer.add_scalar('cross_validation/average_val_acc', avg_acc, 0)
+                summary_writer.add_scalar('cross_validation/std_val_acc', std_acc, 0)
 
                 text_summary = "**Cross-Validation Results**\n\n"
                 text_summary += f"- Number of Folds: {n_folds}\n"
@@ -258,9 +291,14 @@ def train_cross_validation_mpi(config, dataset, args):
                 for result in valid_results:
                     text_summary += f"- Fold {result['fold']}: {result['best_val_acc']:.4f}\n"
 
-                shared_writer.add_text('cross_validation/summary', text_summary, 0)
-                shared_writer.close()
-                logger.info("TensorBoard logs saved")
+                summary_writer.add_text('cross_validation/summary', text_summary, 0)
+
+                # Ensure all data is flushed before closing
+                summary_writer.flush()
+                logger.info("Rank 0: Flushed summary writer")
+                summary_writer.close()
+                logger.info("Rank 0: Closed summary writer - TensorBoard logs saved to %s/summary", 
+                           shared_tensorboard_base_dir)
 
             # Save CV summary
             cv_summary_path = Path(config.output_dir) / f'cv_summary_{config.model_identifier}.yaml'
@@ -278,8 +316,8 @@ def train_cross_validation_mpi(config, dataset, args):
             logger.info("Cross-validation summary saved to: %s", cv_summary_path)
         else:
             logger.error("All folds failed to train!")
-            if shared_writer is not None:
-                shared_writer.close()
+            if summary_writer is not None:
+                summary_writer.close()
             sys.exit(1)
 
 
@@ -404,7 +442,9 @@ def train_cross_validation_sequential(config, dataset, args):
                 # Visualize training data
                 if train_data:
                     try:
-                        max_visualize = getattr(fold_config, 'max_visualize_districts', 5)
+                        max_visualize = getattr(fold_config, 'max_visualize_districts', 9)
+                        logger.info("Fold %d - visualizing %d training districts", 
+                                   fold_idx, min(max_visualize, len(train_data)))
                         log_district_visualizations_to_tensorboard(
                             writer=shared_writer,
                             model=model,
@@ -414,7 +454,9 @@ def train_cross_validation_sequential(config, dataset, args):
                             tag=f'fold{fold_idx}_train',
                             max_districts=max_visualize,
                             device=fold_config.device,
-                            district_path=Path(fold_config.district_path) if hasattr(fold_config, 'district_path') else None
+                            district_path=Path(fold_config.district_path) if hasattr(fold_config, 'district_path') else None,
+                            adjacency_dir=Path(fold_config.adjacency_dir) if hasattr(fold_config, 'adjacency_dir') else None,
+                            enable_spectral_clustering=True
                         )
                         logger.info("Completed training visualizations for fold %d", fold_idx)
                     except Exception as e:
@@ -423,7 +465,9 @@ def train_cross_validation_sequential(config, dataset, args):
                 # Visualize validation data
                 if val_data:
                     try:
-                        max_visualize = getattr(fold_config, 'max_visualize_districts', 5)
+                        max_visualize = getattr(fold_config, 'max_visualize_districts', 9)
+                        logger.info("Fold %d - visualizing %d validation districts", 
+                                   fold_idx, min(max_visualize, len(val_data)))
                         log_district_visualizations_to_tensorboard(
                             writer=shared_writer,
                             model=model,
@@ -433,7 +477,9 @@ def train_cross_validation_sequential(config, dataset, args):
                             tag=f'fold{fold_idx}_val',
                             max_districts=max_visualize,
                             device=fold_config.device,
-                            district_path=Path(fold_config.district_path) if hasattr(fold_config, 'district_path') else None
+                            district_path=Path(fold_config.district_path) if hasattr(fold_config, 'district_path') else None,
+                            adjacency_dir=Path(fold_config.adjacency_dir) if hasattr(fold_config, 'adjacency_dir') else None,
+                            enable_spectral_clustering=True
                         )
                         logger.info("Completed validation visualizations for fold %d", fold_idx)
                     except Exception as e:

@@ -8,7 +8,7 @@ from shapely.ops import unary_union
 from sklearn.cluster import KMeans
 from .utils.logger import get_logger
 
-logger = get_logger()
+logger = get_logger(__name__)
 
 
 def calculate_required_chunks(raster_shape: Tuple[int, int], max_size: int) -> bool:

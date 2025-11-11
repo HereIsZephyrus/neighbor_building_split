@@ -23,7 +23,7 @@ from .utils.logger import setup_logger, get_logger
 from .utils.spectral_clustering import perform_spectral_clustering_pipeline
 from .utils.feature_extractor import extract_clustering_features
 
-logger = get_logger()
+logger = get_logger(__name__)
 
 def parse_args():
     """Parse command line arguments."""

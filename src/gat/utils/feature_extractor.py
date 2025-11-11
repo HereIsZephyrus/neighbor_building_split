@@ -18,7 +18,7 @@ import yaml
 
 from .logger import get_logger
 
-logger = get_logger()
+logger = get_logger(__name__)
 
 # Cache for feature configuration
 _FEATURE_CONFIG = None
@@ -41,13 +41,14 @@ def load_feature_config() -> dict:
 
     if not config_path.exists():
         logger.warning(f"Feature config file not found at {config_path}, using defaults")
-        # Return default configuration
+        # Return default configuration (using shapefile column names)
+        # Note: degree and neighdis are added dynamically during graph construction
         _FEATURE_CONFIG = {
-            'gat_features': ['height', 'albedo', 'hwratio', 'density'],
+            'gat_features': ['height', 'albedo', 'hwratio'],
             'clustering_features': [
-                'height', 'area', 'perimeter', 'orientation', 'elongation',
-                'concavity', 'circularity', 'radius', 'factality', 'overlap',
-                'shape', 'density'
+                'height', 'area', 'perimeter', 'orientatio', 'elongation',
+                'concavity', 'circularit', 'rectangula', 'fractality',
+                'rangeIndex'
             ]
         }
         return _FEATURE_CONFIG
@@ -66,19 +67,19 @@ def extract_gat_features(buildings_gdf: gpd.GeoDataFrame) -> np.ndarray:
     These features are selected for their discriminative power in predicting
     building labels (e.g., residential, commercial, industrial).
 
-    Note: Node degree is added as an additional feature during graph construction.
+    Note: Node degree and neighdis are added as additional features during graph construction.
 
     Design Choice:
     - Uses discriminative features that help GAT distinguish between building types
     - Features are loaded from features_config.yaml for easy configuration
-    - Default: height, albedo, hwratio, density (plus degree added later)
+    - Default: height, albedo, hwratio (plus degree and neighdis added later)
 
     Args:
         buildings_gdf: GeoDataFrame with building attributes
 
     Returns:
         numpy array of shape (N, num_features) with extracted features
-        Note: degree feature is added later in BuildingGraphDataset
+        Note: degree and neighdis features are added later in BuildingGraphDataset
 
     Raises:
         ValueError: If required feature columns are missing from the GeoDataFrame
@@ -87,7 +88,7 @@ def extract_gat_features(buildings_gdf: gpd.GeoDataFrame) -> np.ndarray:
 
     # Load feature names from config
     config = load_feature_config()
-    required_columns = config.get('gat_features', ['height', 'albedo', 'hwratio', 'density'])
+    required_columns = config.get('gat_features', ['height', 'albedo', 'hwratio'])
 
     # Validate required columns exist
     missing_columns = [col for col in required_columns if col not in buildings_gdf.columns]
@@ -147,17 +148,19 @@ def extract_clustering_features(buildings_gdf: gpd.GeoDataFrame) -> np.ndarray:
     # Load feature names from config
     config = load_feature_config()
     required_columns = config.get('clustering_features', [
-        'height', 'area', 'perimeter', 'orientation', 'elongation',
-        'concavity', 'circularity', 'radius', 'factality', 'overlap',
-        'shape', 'density'
+        'height', 'area', 'perimeter', 'orientatio', 'elongation',
+        'concavity', 'circularit', 'rectangula', 'fractality',
+        'rangeIndex'
     ])
 
     # Validate required columns exist
     missing_columns = [col for col in required_columns if col not in buildings_gdf.columns]
     if missing_columns:
+        # Provide helpful error message with available columns
+        available_cols = [c for c in buildings_gdf.columns if c not in ['geometry', 'fid', 'OBJECTID', 'id']]
         raise ValueError(
             f"Missing required columns for clustering features: {missing_columns}. "
-            f"Available columns: {list(buildings_gdf.columns)}"
+            f"Available feature columns: {available_cols}"
         )
 
     logger.debug("Extracting clustering features for %d buildings (features: %s)...", 
@@ -183,10 +186,12 @@ def get_gat_feature_names() -> List[str]:
         List of feature names used in GAT training
     """
     config = load_feature_config()
-    feature_names = config.get('gat_features', ['height', 'albedo', 'hwratio', 'density'])
-    # Add degree if not already present (it's added during graph construction)
+    feature_names = config.get('gat_features', ['height', 'albedo', 'hwratio'])
+    # Add degree and neighdis if not already present (they're added during graph construction)
     if 'degree' not in feature_names:
         feature_names = feature_names + ['degree']
+    if 'neighdis' not in feature_names:
+        feature_names = feature_names + ['neighdis']
     return feature_names
 
 
@@ -199,9 +204,9 @@ def get_clustering_feature_names() -> List[str]:
     """
     config = load_feature_config()
     feature_names = config.get('clustering_features', [
-        'height', 'area', 'perimeter', 'orientation', 'elongation',
-        'concavity', 'circularity', 'radius', 'factality', 'overlap',
-        'shape', 'density'
+        'height', 'area', 'perimeter', 'orientatio', 'elongation',
+        'concavity', 'circularit', 'rectangula', 'fractality', 'overlapInd',
+        'rangeIndex', 'density'
     ])
     # Optionally add degree during clustering if needed
     return feature_names

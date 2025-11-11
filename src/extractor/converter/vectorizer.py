@@ -10,7 +10,7 @@ from rasterio import features as rio_features
 from affine import Affine
 from ..utils.logger import get_logger
 
-logger = get_logger()
+logger = get_logger(__name__)
 
 
 class Vectorizer:

@@ -26,7 +26,7 @@ from sklearn.metrics.pairwise import cosine_similarity
 
 from .logger import get_logger
 
-logger = get_logger()
+logger = get_logger(__name__)
 
 
 def compute_confidence(logits: np.ndarray) -> np.ndarray:

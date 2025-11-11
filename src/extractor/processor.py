@@ -2,7 +2,7 @@ from .utils import get_logger, create_adjacency_matrix
 from .chunker import estimate_raster_shape, calculate_required_chunks
 from .chunk_processor import process_district_chunked
 
-logger = get_logger()
+logger = get_logger(__name__)
 
 def process_district(config, reader, rasterizer, district_row, idx, voronoi_generator=None, mpi_size=1):
     """Process a district."""

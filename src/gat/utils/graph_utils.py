@@ -8,7 +8,7 @@ from scipy.sparse import coo_matrix
 
 from .logger import get_logger
 
-logger = get_logger()
+logger = get_logger(__name__)
 
 
 def similarity_matrix_to_edge_index(

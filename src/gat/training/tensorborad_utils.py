@@ -389,8 +389,13 @@ def log_district_visualizations_to_tensorboard(
                             adjacency_matrix = pd.read_pickle(adjacency_path)
                             building_ids = adjacency_matrix.index.tolist()
 
-                            # Extract clustering features
-                            clustering_features = extract_clustering_features(district_buildings)
+                            # Extract clustering features with standardization
+                            # During training visualization, fit scaler on each district independently
+                            clustering_features, _ = extract_clustering_features(
+                                district_buildings,
+                                scaler=None,
+                                fit_scaler=True
+                            )
 
                             # Load voronoi areas if available
                             voronoi_areas = None

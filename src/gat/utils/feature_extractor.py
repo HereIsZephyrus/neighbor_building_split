@@ -12,9 +12,10 @@ Design Rationale:
 
 import numpy as np
 import geopandas as gpd
-from typing import List
+from typing import Tuple, Optional
 from pathlib import Path
 import yaml
+from sklearn.preprocessing import StandardScaler
 
 from .logger import get_logger
 
@@ -113,7 +114,11 @@ def extract_gat_features(buildings_gdf: gpd.GeoDataFrame) -> np.ndarray:
     return features
 
 
-def extract_clustering_features(buildings_gdf: gpd.GeoDataFrame) -> np.ndarray:
+def extract_clustering_features(
+    buildings_gdf: gpd.GeoDataFrame,
+    scaler: Optional[StandardScaler] = None,
+    fit_scaler: bool = False
+) -> Tuple[np.ndarray, Optional[StandardScaler]]:
     """
     Extract morphological features for spectral clustering.
 
@@ -125,6 +130,7 @@ def extract_clustering_features(buildings_gdf: gpd.GeoDataFrame) -> np.ndarray:
     - Different from GAT features: focuses on "which buildings belong together"
     - GAT focuses on "what type of building" using discriminative features
     - This separation allows spectral clustering to smooth GAT predictions spatially
+    - Features are standardized to ensure all morphological attributes contribute equally
 
     Typical Features:
     - Geometric: area, perimeter, orientation, elongation
@@ -136,9 +142,12 @@ def extract_clustering_features(buildings_gdf: gpd.GeoDataFrame) -> np.ndarray:
 
     Args:
         buildings_gdf: GeoDataFrame with building attributes
+        scaler: Optional pre-fitted StandardScaler for normalization
+        fit_scaler: If True, fit a new scaler on the features (for training)
 
     Returns:
-        numpy array of shape (N, num_features) with extracted features
+        features: numpy array of shape (N, num_features) with extracted and standardized features
+        scaler: Fitted or provided StandardScaler (None if no standardization applied)
 
     Raises:
         ValueError: If required feature columns are missing from the GeoDataFrame
@@ -172,41 +181,20 @@ def extract_clustering_features(buildings_gdf: gpd.GeoDataFrame) -> np.ndarray:
     # Handle NaN and Inf values (replace with 0 for robustness)
     features = np.nan_to_num(features, nan=0.0, posinf=0.0, neginf=0.0)
 
-    logger.debug("Clustering feature extraction complete. Shape: %s", features.shape)
-    logger.debug("Feature ranges - min: %s, max: %s", features.min(axis=0), features.max(axis=0))
+    logger.debug("Clustering feature extraction complete (before normalization). Shape: %s", features.shape)
+    logger.debug("Feature ranges (raw) - min: %s, max: %s", features.min(axis=0), features.max(axis=0))
 
-    return features
+    # Standardize features if requested
+    if fit_scaler:
+        scaler = StandardScaler()
+        features = scaler.fit_transform(features)
+        logger.debug("Fitted new StandardScaler on clustering features")
+        logger.debug("Feature ranges (normalized) - mean: %s, std: %s", 
+                     scaler.mean_, scaler.scale_)
+    elif scaler is not None:
+        features = scaler.transform(features)
+        logger.debug("Applied existing StandardScaler to clustering features")
+    else:
+        logger.warning("No standardization applied to clustering features (scaler=None, fit_scaler=False)")
 
-
-def get_gat_feature_names() -> List[str]:
-    """
-    Get list of GAT feature names from configuration.
-
-    Returns:
-        List of feature names used in GAT training
-    """
-    config = load_feature_config()
-    feature_names = config.get('gat_features', ['height', 'albedo', 'hwratio'])
-    # Add degree and neighdis if not already present (they're added during graph construction)
-    if 'degree' not in feature_names:
-        feature_names = feature_names + ['degree']
-    if 'neighdis' not in feature_names:
-        feature_names = feature_names + ['neighdis']
-    return feature_names
-
-
-def get_clustering_feature_names() -> List[str]:
-    """
-    Get list of clustering feature names from configuration.
-
-    Returns:
-        List of feature names used in spectral clustering
-    """
-    config = load_feature_config()
-    feature_names = config.get('clustering_features', [
-        'height', 'area', 'perimeter', 'orientatio', 'elongation',
-        'concavity', 'circularit', 'rectangula', 'fractality', 'overlapInd',
-        'rangeIndex', 'density'
-    ])
-    # Optionally add degree during clustering if needed
-    return feature_names
+    return features, scaler

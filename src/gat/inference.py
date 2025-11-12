@@ -16,7 +16,6 @@ import numpy as np
 import pandas as pd
 import geopandas as gpd
 from tqdm import tqdm
-from .training import GATConfig
 from .models.gat import GAT
 from .data.data_utils import load_district_graph
 from .utils.logger import setup_logger, get_logger
@@ -113,7 +112,7 @@ def load_model_from_file(checkpoint_path: Path, device: str) -> tuple:
         device: Device to load model to
 
     Returns:
-        Tuple of (model, config)
+        Tuple of (model, config, clustering_scaler)
     """
     logger.info("Loading checkpoint from %s", checkpoint_path)
 
@@ -140,10 +139,17 @@ def load_model_from_file(checkpoint_path: Path, device: str) -> tuple:
     model.to(device)
     model.eval()
 
+    # Load clustering scaler if available
+    clustering_scaler = checkpoint.get('clustering_scaler', None)
+    if clustering_scaler is not None:
+        logger.info("Loaded clustering feature scaler from checkpoint")
+    else:
+        logger.warning("No clustering scaler found in checkpoint - will fit new scaler during inference")
+
     logger.info("Model loaded from epoch %s", checkpoint.get('epoch', 'unknown'))
     logger.info("Model:\n%s", model)
 
-    return model, config_dict
+    return model, config_dict, clustering_scaler
 
 
 def generate_embeddings_for_district(
@@ -153,6 +159,7 @@ def generate_embeddings_for_district(
     building_path: Path,
     device: str,
     scaler=None,
+    clustering_scaler=None,
     perform_clustering: bool = True,
     n_clusters: Optional[int] = None
 ) -> tuple:
@@ -172,14 +179,15 @@ def generate_embeddings_for_district(
         adjacency_dir: Data directory
         building_path: Path to building shapefile
         device: Device
-        scaler: Optional pre-fitted StandardScaler
+        scaler: Optional pre-fitted StandardScaler for GAT features
+        clustering_scaler: Optional pre-fitted StandardScaler for clustering features
         perform_clustering: Whether to perform spectral clustering
         n_clusters: Number of clusters (auto-estimate if None)
 
     Returns:
         Tuple of (embeddings, logits, gat_labels, spectral_clusters, 
                   cluster_to_label, original_labels, num_nodes, n_clusters, scaler, has_labels,
-                  component_labels, component_stats)
+                  component_labels, component_stats, clustering_scaler)
     """
 
     try:
@@ -215,8 +223,22 @@ def generate_embeddings_for_district(
         buildings_gdf['_sort_key'] = buildings_gdf[id_field].map({bid: i for i, bid in enumerate(building_ids_in_matrix)})
         buildings_gdf = buildings_gdf.sort_values('_sort_key').reset_index(drop=True)
 
-        # Extract clustering features (12 base features)
-        clustering_features = extract_clustering_features(buildings_gdf)
+        # Extract clustering features with standardization
+        if clustering_scaler is None:
+            # First district: fit scaler on clustering features
+            clustering_features, clustering_scaler = extract_clustering_features(
+                buildings_gdf, 
+                scaler=None,
+                fit_scaler=True
+            )
+            logger.info(f"Fitted new StandardScaler on clustering features for district {district_id}")
+        else:
+            # Subsequent districts: use existing scaler
+            clustering_features, _ = extract_clustering_features(
+                buildings_gdf,
+                scaler=clustering_scaler,
+                fit_scaler=False
+            )
 
         # Extract voronoi areas from building data for cluster merging
         voronoi_areas = None
@@ -456,12 +478,13 @@ def generate_embeddings_for_district(
             scaler,
             has_labels,
             component_labels_np,
-            component_stats
+            component_stats,
+            clustering_scaler
         )
 
     except Exception as exc:  # pylint: disable=broad-except
         logger.error("Failed to generate embeddings for district %d: %s", district_id, exc, exc_info=True)
-        return None, None, None, None, None, None, 0, None, scaler, False, None, None
+        return None, None, None, None, None, None, 0, None, scaler, False, None, None, clustering_scaler
 
 
 def save_embeddings(
@@ -757,7 +780,7 @@ def main(args=None):
     logger.info("Device: %s", args.device)
 
     # Load model
-    model, _ = load_model_from_file(model_path, args.device)
+    model, _, clustering_scaler = load_model_from_file(model_path, args.device)
 
     # Get district IDs
     if args.district_ids:
@@ -799,13 +822,14 @@ def main(args=None):
             building_path=building_path,
             device=args.device,
             scaler=scaler,
+            clustering_scaler=clustering_scaler,
             perform_clustering=True,
             n_clusters=None  # Auto-detect optimal number
         )
 
         (embeddings, logits, gat_labels, spectral_clusters, 
          cluster_to_label, original_labels, num_nodes, n_clusters, scaler, has_labels,
-         component_labels, component_stats) = result
+         component_labels, component_stats, clustering_scaler) = result
 
         if embeddings is not None:
             # Save embeddings and clustering results

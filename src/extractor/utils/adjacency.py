@@ -80,7 +80,7 @@ def create_adjacency_matrix(
 ) -> pd.DataFrame:
     """
     Create symmetric adjacency matrix with distances between adjacent buildings.
-    
+
     Matrix values: 0 = not adjacent, >0 = distance in meters.
     """
     adjacent_pairs = find_adjacent_voronoi_regions(voronoi_gdf)

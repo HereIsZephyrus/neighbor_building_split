@@ -8,6 +8,7 @@ gat_features:
   - albedo      # Surface albedo (reflectivity)
   - hwratio     # Height-to-width ratio
   - area
+  - orientatio
   # Note: 'degree' (number of neighbors) and 'neighdis' (average neighbor distance) are added automatically during graph construction
 
 # Clustering Features (used during spectral clustering for spatial grouping)

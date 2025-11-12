@@ -31,7 +31,7 @@ class VoronoiGenerator:
     ) -> Tuple[np.ndarray, np.ndarray]:
         """
         Generate Voronoi partition using morphological dilation.
-        
+
         Returns (voronoi_partition, buildings_mask) where unclassified pixels are -999.
         """
         building_binary = (building_raster > 0).astype(np.uint8)
@@ -165,7 +165,7 @@ class VoronoiGenerator:
     ) -> np.ndarray:
         """
         Dilate labeled regions using 8-connectivity until district is filled.
-        
+
         Returns labeled array with all district pixels assigned to nearest building.
         """
         result = labeled_array.copy()
@@ -437,7 +437,7 @@ class VoronoiGenerator:
     ) -> Tuple[gpd.GeoDataFrame, np.ndarray]:
         """
         Generate Voronoi diagram and convert to polygon features.
-        
+
         Returns (voronoi_polygons_gdf, voronoi_partition_array).
         """
         voronoi, _ = self.generate_voronoi_from_raster(
@@ -464,7 +464,7 @@ class VoronoiGenerator:
     ) -> Tuple[gpd.GeoDataFrame, np.ndarray]:
         """
         Generate Voronoi diagram and extract boundary lines.
-        
+
         DEPRECATED: Use generate_voronoi_polygons for polygon output.
         """
         voronoi, original_buildings_mask = self.generate_voronoi_from_raster(

@@ -15,7 +15,7 @@ logger = get_logger(__name__)
 class GAT(nn.Module):
     """
     Multi-layer Graph Attention Network with ELU activation.
-    
+
     Uses multi-head attention in hidden layers, single-head output.
     """
 
@@ -97,7 +97,7 @@ class GAT(nn.Module):
     ) -> torch.Tensor:
         """
         Forward pass through GAT layers.
-        
+
         Returns logits (N, num_classes), or (logits, embeddings) if requested.
         """
         x = F.dropout(x, p=self.dropout, training=self.training)

@@ -9,7 +9,7 @@ logger = get_logger(__name__)
 def process_district(config, reader, rasterizer, district_row, idx, voronoi_generator=None, mpi_size=1):
     """
     Process a single district to generate Voronoi diagrams or rasters.
-    
+
     Automatically switches between standard and chunked processing based on district size.
     """
     district_id = district_row.get("FID", district_row.get("fid", idx))

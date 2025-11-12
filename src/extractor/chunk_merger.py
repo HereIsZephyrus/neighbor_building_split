@@ -18,7 +18,7 @@ def merge_voronoi_chunks(
 ) -> gpd.GeoDataFrame:
     """
     Merge Voronoi polygons by building ID, unifying split regions.
-    
+
     Returns unified GeoDataFrame with one row per building.
     """
     logger.debug("Merging Voronoi polygons from %d chunks", len(chunk_voronoi_gdfs))
@@ -62,7 +62,7 @@ def merge_adjacency_matrices(
 ) -> pd.DataFrame:
     """
     Merge and re-validate adjacency matrices from chunks.
-    
+
     Recalculates relationships using merged Voronoi geometries to ensure
     accuracy at chunk boundaries.
     """
@@ -153,7 +153,7 @@ def stitch_rasters(
 ) -> np.ndarray:
     """
     Stitch chunk rasters into unified output.
-    
+
     Uses priority map to handle overlapping regions.
     """
     logger.debug("Stitching %d rasters (shape: %s)", len(chunk_rasters), full_shape)

@@ -29,7 +29,7 @@ class Rasterizer:
     ) -> Tuple[np.ndarray, Affine, Tuple[float, float, float, float]]:
         """
         Rasterize buildings with IDs as pixel values.
-        
+
         Returns (raster, transform, bounds) where raster pixels are:
         building_id (>0), background (0), or NoData (-999).
         """

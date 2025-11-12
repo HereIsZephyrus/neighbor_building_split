@@ -63,6 +63,7 @@ class GATConfig:
     # Logging and checkpointing
     log_interval: int = 10  # Log every N epochs
     checkpoint_interval: int = 50  # Save checkpoint every N epochs
+    enable_checkpoint_saving: bool = True  # Enable periodic checkpoint saving (disable for HPC tuning)
     enable_tensorboard: bool = True  # Enable TensorBoard logging
 
     # Visualization
@@ -84,7 +85,7 @@ class GATConfig:
     spectral_distance_weight: float = 0.2  # Weight for spatial distance affinity
     spectral_distance_scale: float = 100.0  # Distance-to-affinity conversion scale (meters)
     spectral_oversample_factor: float = 1.5  # Cluster oversampling factor
-    spectral_use_confidence_weighted_voting: bool = True  # Use confidence-weighted voting
+    spectral_use_confidence_weighted_voting: bool = False  # Use confidence-weighted voting
     spectral_confidence_threshold_high: float = 0.8  # High confidence threshold
     spectral_confidence_threshold_low: float = 0.5  # Low confidence threshold
 
@@ -202,6 +203,7 @@ class GATConfig:
             # Logging parameters
             'log_interval': logging_params.get('log_interval'),
             'checkpoint_interval': logging_params.get('checkpoint_interval'),
+            'enable_checkpoint_saving': logging_params.get('enable_checkpoint_saving'),
             'enable_tensorboard': logging_params.get('enable_tensorboard'),
 
             # Other parameters

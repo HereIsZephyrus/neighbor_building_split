@@ -18,7 +18,8 @@ def save_checkpoint(
     metrics: Dict[str, float],
     config: Any,
     filepath: Path,
-    is_best: bool = False
+    is_best: bool = False,
+    clustering_scaler: Optional[Any] = None
 ) -> None:
     """
     Save model checkpoint.
@@ -32,6 +33,7 @@ def save_checkpoint(
         config: Training configuration
         filepath: Path to save checkpoint
         is_best: Whether this is the best model so far
+        clustering_scaler: Optional StandardScaler for clustering features
     """
     config_dict = config.to_dict() if hasattr(config, 'to_dict') else {}
 
@@ -46,6 +48,11 @@ def save_checkpoint(
 
     if scheduler is not None:
         checkpoint['scheduler_state_dict'] = scheduler.state_dict()
+
+    # Save clustering scaler if provided
+    if clustering_scaler is not None:
+        checkpoint['clustering_scaler'] = clustering_scaler
+        logger.debug("Clustering scaler included in checkpoint")
 
     torch.save(checkpoint, filepath)
     logger.info("Checkpoint saved to %s (model_identifier: %s)", filepath, checkpoint['model_identifier'])

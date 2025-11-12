@@ -537,15 +537,18 @@ def estimate_optimal_clusters(
     eigenvalues = np.sort(eigenvalues)
 
     # Find eigengap (largest gap in first max_clusters eigenvalues)
-    max_clusters = min(max_clusters, len(eigenvalues) - 1)
-    eigengaps = np.diff(eigenvalues[:max_clusters + 1])
+    # Force maximum clusters to be 10
+    max_clusters_limit = min(10, len(eigenvalues) - 1)
+    eigengaps = np.diff(eigenvalues[:max_clusters_limit + 1])
 
     optimal_k_base = np.argmax(eigengaps) + 1
-    optimal_k_base = max(min_clusters, min(optimal_k_base, max_clusters))
+    # Force minimum K = 1, maximum K = 10
+    optimal_k_base = max(1, min(optimal_k_base, 10))
 
     # Apply oversampling
     optimal_k = int(np.round(optimal_k_base * oversample_factor))
-    optimal_k = max(min_clusters, min(optimal_k, max_clusters))
+    # Force minimum K = 1, maximum K = 10
+    optimal_k = max(1, min(optimal_k, 10))
 
     logger.info(
         "Estimated optimal number of clusters: base=%d, oversampled=%d (factor=%.2f)",
@@ -677,4 +680,3 @@ def perform_spectral_clustering_pipeline(
     )
 
     return cluster_assignments, final_labels, filtered_cluster_to_label, affinity_matrix, cluster_stats
-

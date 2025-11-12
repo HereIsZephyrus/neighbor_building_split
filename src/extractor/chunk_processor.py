@@ -21,7 +21,7 @@ def _calculate_optimal_chunks(
 ) -> int:
     """
     Calculate optimal chunk count balancing parallelism and overhead.
-    
+
     Ensures at least 100 buildings per chunk, caps at 32 chunks total.
     MPI-aware: scales with worker count when MPI is enabled.
     """
@@ -55,7 +55,7 @@ def process_chunk(
 ) -> Optional[Tuple[gpd.GeoDataFrame, np.ndarray, Affine, Tuple[float, float, float, float], gpd.GeoDataFrame]]:
     """
     Process a single spatial chunk to generate Voronoi diagram.
-    
+
     Returns (voronoi_gdf, voronoi_raster, transform, bounds, buildings) or None on failure.
     """
     logger.debug("Processing chunk %d with %d buildings", chunk_id, len(chunk_buildings))
@@ -109,7 +109,7 @@ def process_district_chunked(
 ) -> bool:
     """
     Process large district using spatial partitioning and parallel workers.
-    
+
     Returns True on success, False on failure.
     """
     district_id = district_row.get("FID")

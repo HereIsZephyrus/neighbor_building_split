@@ -608,18 +608,35 @@ class Trainer:
                 best_val_acc = val_metrics['accuracy']
                 is_best = True
 
-            if epoch % self.config.checkpoint_interval == 0 or is_best:
-                checkpoint_path = Path(self.config.checkpoint_dir) / f'{self.config.model_identifier}_checkpoint_epoch_{epoch}.pth'
-                save_checkpoint(
-                    self.model,
-                    self.optimizer,
-                    self.scheduler,
-                    epoch,
-                    val_metrics if val_metrics else train_metrics,
-                    self.config,
-                    checkpoint_path,
-                    is_best=is_best
-                )
+            # Save checkpoints based on config settings
+            if self.config.enable_checkpoint_saving:
+                # Normal mode: save periodic and best checkpoints
+                if epoch % self.config.checkpoint_interval == 0 or is_best:
+                    checkpoint_path = Path(self.config.checkpoint_dir) / f'{self.config.model_identifier}_checkpoint_epoch_{epoch}.pth'
+                    save_checkpoint(
+                        self.model,
+                        self.optimizer,
+                        self.scheduler,
+                        epoch,
+                        val_metrics if val_metrics else train_metrics,
+                        self.config,
+                        checkpoint_path,
+                        is_best=is_best
+                    )
+            else:
+                # HPC tuning mode: only save best checkpoint
+                if is_best:
+                    checkpoint_path = Path(self.config.checkpoint_dir) / f'{self.config.model_identifier}_best.pt'
+                    save_checkpoint(
+                        self.model,
+                        self.optimizer,
+                        self.scheduler,
+                        epoch,
+                        val_metrics if val_metrics else train_metrics,
+                        self.config,
+                        checkpoint_path,
+                        is_best=True
+                    )
 
             # Early stopping
             if val_metrics:
@@ -627,19 +644,20 @@ class Trainer:
                     logger.info(f"Early stopping at epoch {epoch}")
                     break
 
-        # Save final checkpoint
-        final_model_dir = Path(self.config.output_root_dir) / 'models'
-        final_model_dir.mkdir(parents=True, exist_ok=True)
-        final_checkpoint_path = final_model_dir / f'{self.config.model_identifier}_final_model.pth'
-        save_checkpoint(
-            self.model,
-            self.optimizer,
-            self.scheduler,
-            epoch,
-            val_metrics if val_metrics else train_metrics,
-            self.config,
-            final_checkpoint_path
-        )
+        # Save final checkpoint (only if checkpoint saving is enabled)
+        if self.config.enable_checkpoint_saving:
+            final_model_dir = Path(self.config.output_root_dir) / 'models'
+            final_model_dir.mkdir(parents=True, exist_ok=True)
+            final_checkpoint_path = final_model_dir / f'{self.config.model_identifier}_final_model.pth'
+            save_checkpoint(
+                self.model,
+                self.optimizer,
+                self.scheduler,
+                epoch,
+                val_metrics if val_metrics else train_metrics,
+                self.config,
+                final_checkpoint_path
+            )
 
         # Save training history
         history_path = Path(self.config.checkpoint_dir) / f'{self.config.model_identifier}_training_history.json'

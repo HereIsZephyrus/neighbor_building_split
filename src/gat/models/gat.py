@@ -1,8 +1,4 @@
-"""Graph Attention Network (GAT) model.
-
-Implementation following pytorch-GAT (Gordicaleksa's implementation)
-with architecture adapted for building clustering task.
-"""
+"""Graph Attention Network for building clustering."""
 
 import torch
 import torch.nn as nn
@@ -13,25 +9,19 @@ from .gat_layer import GATConv
 from ..utils.logger import get_logger
 from ..utils.graph_utils import global_pool
 
-logger = get_logger()
+logger = get_logger(__name__)
 
 
 class GAT(nn.Module):
     """
-    Graph Attention Network for node classification.
+    Multi-layer Graph Attention Network with ELU activation.
 
-    Architecture (similar to pytorch-GAT for Cora):
-        - Layer 1: in_features → hidden_dim (heads=num_heads, concat)
-        - Layer 2: hidden_dim*heads → hidden_dim (heads=num_heads, concat)
-        - Layer 3: hidden_dim*heads → num_classes (heads=1, average)
-
-    Activation: ELU (as in original paper)
-    Dropout: Applied to both input features and attention weights
+    Uses multi-head attention in hidden layers, single-head output.
     """
 
     def __init__(
         self,
-        in_features: int = 13,
+        in_features: int = 5,
         hidden_dim: int = 64,
         num_classes: int = 8,
         num_layers: int = 3,
@@ -40,19 +30,7 @@ class GAT(nn.Module):
         negative_slope: float = 0.2,
         add_self_loops: bool = True
     ):
-        """
-        Initialize GAT model.
-
-        Args:
-            in_features: Number of input features per node
-            hidden_dim: Hidden dimension per attention head
-            num_classes: Number of output classes (building categories)
-            num_layers: Number of GAT layers (default: 3)
-            num_heads: Number of attention heads in hidden layers
-            dropout: Dropout rate (applied to features and attention)
-            negative_slope: LeakyReLU negative slope for attention
-            add_self_loops: Whether to add self-loops
-        """
+        """Initialize GAT with specified architecture."""
         super().__init__()
 
         self.in_features = in_features
@@ -64,23 +42,20 @@ class GAT(nn.Module):
 
         assert num_layers >= 2, "GAT requires at least 2 layers"
 
-        # Create GAT layers
         self.convs = nn.ModuleList()
 
-        # First layer: in_features → hidden_dim
         self.convs.append(
             GATConv(
                 in_channels=in_features,
                 out_channels=hidden_dim,
                 heads=num_heads,
-                concat=True,  # Concatenate attention heads
+                concat=True,
                 dropout=dropout,
                 negative_slope=negative_slope,
                 add_self_loops=add_self_loops
             )
         )
 
-        # Hidden layers: (hidden_dim * num_heads) → hidden_dim
         for _ in range(num_layers - 2):
             self.convs.append(
                 GATConv(
@@ -94,26 +69,23 @@ class GAT(nn.Module):
                 )
             )
 
-        # Final layer: (hidden_dim * num_heads) → num_classes
-        # Use single head and average (as in pytorch-GAT)
         self.convs.append(
             GATConv(
                 in_channels=hidden_dim * num_heads,
                 out_channels=num_classes,
                 heads=1,
-                concat=False,  # Average the single head
+                concat=False,
                 dropout=dropout,
                 negative_slope=negative_slope,
                 add_self_loops=add_self_loops
             )
         )
 
-        # Embedding dimension (for downstream tasks)
         self.embedding_dim = hidden_dim * num_heads
 
-        logger.info(
-            "Initialized GAT: layers=%d, hidden_dim=%d, heads=%d, classes=%d, dropout=%.2f, embedding_dim=%d",
-            num_layers, hidden_dim, num_heads, num_classes, dropout, self.embedding_dim
+        logger.debug(
+            "GAT: %d layers, hidden=%d, heads=%d, classes=%d, dropout=%.2f",
+            num_layers, hidden_dim, num_heads, num_classes, dropout
         )
 
     def forward(
@@ -124,33 +96,18 @@ class GAT(nn.Module):
         return_embeddings: bool = False
     ) -> torch.Tensor:
         """
-        Forward pass through GAT.
+        Forward pass through GAT layers.
 
-        Args:
-            x: Node features (N, in_features)
-            edge_index: Edge indices (2, E)
-            edge_attr: Optional edge attributes (E,) - not used currently
-            return_embeddings: If True, return (logits, embeddings)
-
-        Returns:
-            If return_embeddings=True:
-                (logits, embeddings): Node classification logits and embeddings
-            Otherwise:
-                logits: Output class logits (N, num_classes)
+        Returns logits (N, num_classes), or (logits, embeddings) if requested.
         """
-        # Input dropout
         x = F.dropout(x, p=self.dropout, training=self.training)
 
-        # Forward through all layers except the last
-        for i, conv in enumerate(self.convs[:-1]):
+        for conv in self.convs[:-1]:
             x = conv(x, edge_index, edge_attr)
-            x = F.elu(x)  # ELU activation as in original paper
+            x = F.elu(x)
             x = F.dropout(x, p=self.dropout, training=self.training)
 
-        # Save embeddings before final layer
         embeddings = x
-
-        # Final layer for node classification (no activation, no dropout after)
         node_logits = self.convs[-1](x, edge_index, edge_attr)
 
         if return_embeddings:
@@ -164,17 +121,7 @@ class GAT(nn.Module):
         edge_index: torch.Tensor,
         edge_attr: Optional[torch.Tensor] = None
     ) -> torch.Tensor:
-        """
-        Extract node embeddings from penultimate layer.
-
-        Args:
-            x: Node features (N, in_features)
-            edge_index: Edge indices (2, E)
-            edge_attr: Optional edge attributes (E,)
-
-        Returns:
-            embeddings: Node embeddings (N, embedding_dim)
-        """
+        """Extract node embeddings from penultimate layer."""
         _, embeddings = self.forward(x, edge_index, edge_attr, return_embeddings=True)
         return embeddings
 
@@ -184,18 +131,7 @@ class GAT(nn.Module):
         edge_index: torch.Tensor,
         edge_attr: Optional[torch.Tensor] = None
     ) -> Tuple[torch.Tensor, torch.Tensor]:
-        """
-        Forward pass for inference: returns logits and embeddings.
-
-        Args:
-            x: Node features (N, in_features)
-            edge_index: Edge indices (2, E)
-            edge_attr: Optional edge attributes (E,)
-
-        Returns:
-            logits: Node classification logits (N, num_classes)
-            embeddings: Node embeddings (N, embedding_dim)
-        """
+        """Forward pass returning both logits and embeddings."""
         logits, embeddings = self.forward(
             x, edge_index, edge_attr, return_embeddings=True
         )
@@ -207,24 +143,11 @@ class GAT(nn.Module):
         edge_index: torch.Tensor,
         layer_idx: int = 0
     ) -> Tuple[torch.Tensor, torch.Tensor]:
-        """
-        Get attention weights from a specific layer.
-
-        Args:
-            x: Node features (N, in_features)
-            edge_index: Edge indices (2, E)
-            layer_idx: Which layer to extract attention from
-
-        Returns:
-            edge_index: Edge indices with self-loops (2, E')
-            attention_weights: Attention weights (E', num_heads)
-        """
-        # Forward through layers up to layer_idx
+        """Extract attention weights from specified layer."""
         x = F.dropout(x, p=self.dropout, training=self.training)
 
         for conv_idx, conv in enumerate(self.convs[:layer_idx + 1]):
             if conv_idx == layer_idx:
-                # Return attention weights from this layer
                 x, (edge_index_out, attention) = conv(
                     x, edge_index, return_attention_weights=True
                 )

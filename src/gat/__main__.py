@@ -74,6 +74,13 @@ def parse_args():
         default=None,
         help='Path to training config YAML file (default: src/gat/training_config.yaml) [train mode]'
     )
+    parser.add_argument(
+        '--mode',
+        type=str,
+        default='cv',
+        choices=['cv', 'final'],
+        help='Training mode: "cv" for cross-validation (hyperparameter tuning), "final" for full training on all data [train mode]'
+    )
 
     # Inference arguments
     parser.add_argument(
@@ -110,6 +117,7 @@ def parse_args():
 
 def main():
     """Main entry point."""
+    print("Starting GAT model training and inference...")
     args = parse_args()
 
     if args.train and args.inference:
@@ -144,7 +152,8 @@ def main():
             output_root_dir=args.output_root_dir,
             model_identifier=args.model_identifier,
             config=args.config,
-            resume=args.resume
+            resume=args.resume,
+            mode=args.mode
         )
         train_main(train_args)
 

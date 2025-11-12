@@ -1,15 +1,13 @@
 """Training utilities and helper functions."""
 
-import torch
-import torch.nn as nn
 from pathlib import Path
 from typing import Dict, Optional, Any
 import json
+import torch
+import torch.nn as nn
+from ..utils import get_logger, compute_metrics
 
-from ..utils.metrics import compute_metrics
-from ..utils.logger import get_logger
-
-logger = get_logger()
+logger = get_logger(__name__)
 
 
 def save_checkpoint(
@@ -20,7 +18,8 @@ def save_checkpoint(
     metrics: Dict[str, float],
     config: Any,
     filepath: Path,
-    is_best: bool = False
+    is_best: bool = False,
+    clustering_scaler: Optional[Any] = None
 ) -> None:
     """
     Save model checkpoint.
@@ -34,9 +33,10 @@ def save_checkpoint(
         config: Training configuration
         filepath: Path to save checkpoint
         is_best: Whether this is the best model so far
+        clustering_scaler: Optional StandardScaler for clustering features
     """
     config_dict = config.to_dict() if hasattr(config, 'to_dict') else {}
-    
+
     checkpoint = {
         'epoch': epoch,
         'model_state_dict': model.state_dict(),
@@ -48,6 +48,11 @@ def save_checkpoint(
 
     if scheduler is not None:
         checkpoint['scheduler_state_dict'] = scheduler.state_dict()
+
+    # Save clustering scaler if provided
+    if clustering_scaler is not None:
+        checkpoint['clustering_scaler'] = clustering_scaler
+        logger.debug("Clustering scaler included in checkpoint")
 
     torch.save(checkpoint, filepath)
     logger.info("Checkpoint saved to %s (model_identifier: %s)", filepath, checkpoint['model_identifier'])
@@ -127,26 +132,6 @@ def compute_loss_and_metrics(
     metrics['loss'] = loss.item()
 
     return metrics
-
-
-def log_metrics_to_tensorboard(
-    writer,
-    metrics: Dict[str, float],
-    epoch: int,
-    prefix: str = 'train'
-) -> None:
-    """
-    Log metrics to TensorBoard.
-
-    Args:
-        writer: TensorBoard SummaryWriter
-        metrics: Dictionary of metrics to log
-        epoch: Current epoch
-        prefix: Prefix for metric names (e.g., 'train', 'val')
-    """
-    for key, value in metrics.items():
-        writer.add_scalar(f'{prefix}/{key}', value, epoch)
-
 
 def log_model_info(model: nn.Module) -> None:
     """

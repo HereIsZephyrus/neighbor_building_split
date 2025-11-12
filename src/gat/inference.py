@@ -9,18 +9,27 @@ import sys
 from pathlib import Path
 from typing import List, Optional
 import pickle
+import yaml
 
 import torch
 import numpy as np
 import pandas as pd
 import geopandas as gpd
 from tqdm import tqdm
-
 from .models.gat import GAT
 from .data.data_utils import load_district_graph
 from .utils.logger import setup_logger, get_logger
 from .utils.spectral_clustering import perform_spectral_clustering_pipeline
+from .utils.feature_extractor import extract_clustering_features
+from .utils.graph_utils import get_connected_components
+from .utils.graph_utils_ext import (
+    extract_subgraph,
+    extract_subgraph_from_adjacency,
+    merge_component_results,
+    get_component_statistics
+)
 
+logger = get_logger(__name__)
 
 def parse_args():
     """Parse command line arguments."""
@@ -103,9 +112,8 @@ def load_model_from_file(checkpoint_path: Path, device: str) -> tuple:
         device: Device to load model to
 
     Returns:
-        Tuple of (model, config)
+        Tuple of (model, config, clustering_scaler)
     """
-    logger = get_logger()
     logger.info("Loading checkpoint from %s", checkpoint_path)
 
     checkpoint = torch.load(checkpoint_path, map_location=device)
@@ -116,7 +124,7 @@ def load_model_from_file(checkpoint_path: Path, device: str) -> tuple:
 
     # Create model
     model = GAT(
-        in_features=model_config.get('in_features', 13),
+        in_features=model_config.get('in_features', 14),
         hidden_dim=model_config.get('hidden_dim', 64),
         num_classes=model_config.get('num_classes', 3),
         num_layers=model_config.get('num_layers', 3),
@@ -131,10 +139,17 @@ def load_model_from_file(checkpoint_path: Path, device: str) -> tuple:
     model.to(device)
     model.eval()
 
+    # Load clustering scaler if available
+    clustering_scaler = checkpoint.get('clustering_scaler', None)
+    if clustering_scaler is not None:
+        logger.info("Loaded clustering feature scaler from checkpoint")
+    else:
+        logger.warning("No clustering scaler found in checkpoint - will fit new scaler during inference")
+
     logger.info("Model loaded from epoch %s", checkpoint.get('epoch', 'unknown'))
     logger.info("Model:\n%s", model)
 
-    return model, config_dict
+    return model, config_dict, clustering_scaler
 
 
 def generate_embeddings_for_district(
@@ -144,11 +159,19 @@ def generate_embeddings_for_district(
     building_path: Path,
     device: str,
     scaler=None,
+    clustering_scaler=None,
     perform_clustering: bool = True,
     n_clusters: Optional[int] = None
 ) -> tuple:
     """
-    Generate embeddings for a single district and optionally perform spectral clustering.
+    Generate embeddings for a single district and perform spectral clustering with connected component separation.
+
+    This function uses connected component separation to ensure spatial contiguity:
+    - Identifies spatially disconnected components in the graph
+    - Processes each component independently with GAT forward pass
+    - Applies spectral clustering to components with >= min_component_size buildings
+    - Uses majority voting for smaller components
+    - Ensures each cluster contains only spatially connected buildings
 
     Args:
         model: Trained GAT model
@@ -156,18 +179,19 @@ def generate_embeddings_for_district(
         adjacency_dir: Data directory
         building_path: Path to building shapefile
         device: Device
-        scaler: Optional pre-fitted StandardScaler
+        scaler: Optional pre-fitted StandardScaler for GAT features
+        clustering_scaler: Optional pre-fitted StandardScaler for clustering features
         perform_clustering: Whether to perform spectral clustering
         n_clusters: Number of clusters (auto-estimate if None)
 
     Returns:
         Tuple of (embeddings, logits, gat_labels, spectral_clusters, 
-                  cluster_to_label, original_labels, num_nodes, n_clusters, scaler, has_labels)
+                  cluster_to_label, original_labels, num_nodes, n_clusters, scaler, has_labels,
+                  component_labels, component_stats, clustering_scaler)
     """
-    logger = get_logger()
 
     try:
-        # Load district data (normalized features)
+        # Load district data with GAT features (normalized)
         data, scaler = load_district_graph(
             district_id=district_id,
             adjacency_dir=adjacency_dir,
@@ -176,26 +200,66 @@ def generate_embeddings_for_district(
             scaler=scaler
         )
 
-        # Also load unnormalized data to get original features
-        data_unnorm, _ = load_district_graph(
-            district_id=district_id,
-            adjacency_dir=adjacency_dir,
-            building_path=building_path,
-            normalize_features=False,
-            scaler=None
-        )
-        original_features = data_unnorm.x.numpy()
+        # Load buildings for clustering features
+        buildings_gdf = gpd.read_file(building_path)
 
-        # Load adjacency matrix
+        # Load adjacency matrix to get building IDs
         adjacency_path = adjacency_dir / f"district_{district_id}_adjacency.pkl"
         adjacency_matrix = pd.read_pickle(adjacency_path)
+        building_ids_in_matrix = adjacency_matrix.index.tolist()
+
+        # Filter and sort buildings to match adjacency matrix
+        id_field = None
+        for possible_id in ['FID', 'OBJECTID', 'ID', 'id', 'building_id']:
+            if possible_id in buildings_gdf.columns:
+                id_field = possible_id
+                break
+
+        if id_field is None:
+            buildings_gdf['building_id'] = buildings_gdf.index
+            id_field = 'building_id'
+
+        buildings_gdf = buildings_gdf[buildings_gdf[id_field].isin(building_ids_in_matrix)].copy()
+        buildings_gdf['_sort_key'] = buildings_gdf[id_field].map({bid: i for i, bid in enumerate(building_ids_in_matrix)})
+        buildings_gdf = buildings_gdf.sort_values('_sort_key').reset_index(drop=True)
+
+        # Extract clustering features with standardization
+        if clustering_scaler is None:
+            # First district: fit scaler on clustering features
+            clustering_features, clustering_scaler = extract_clustering_features(
+                buildings_gdf, 
+                scaler=None,
+                fit_scaler=True
+            )
+            logger.info(f"Fitted new StandardScaler on clustering features for district {district_id}")
+        else:
+            # Subsequent districts: use existing scaler
+            clustering_features, _ = extract_clustering_features(
+                buildings_gdf,
+                scaler=clustering_scaler,
+                fit_scaler=False
+            )
+
+        # Extract voronoi areas from building data for cluster merging
+        voronoi_areas = None
+        if 'voroniarea' in buildings_gdf.columns:
+            # Create dictionary mapping building ID to voronoi area
+            voronoi_areas = dict(zip(building_ids_in_matrix, buildings_gdf['voroniarea'].values))
+            logger.debug(f"Extracted voronoi areas for district {district_id}: {len(voronoi_areas)} buildings")
+        else:
+            logger.warning(f"'voroniarea' field not found in building data for district {district_id}")
 
         # Move to device
         data = data.to(device)
 
+        # Extract edge_attr if available and ensure it's on the correct device
+        edge_attr = None
+        if hasattr(data, 'edge_attr') and data.edge_attr is not None:
+            edge_attr = data.edge_attr.to(device)
+
         # GAT forward pass: get logits and embeddings
         with torch.no_grad():
-            logits, embeddings = model.forward_inference(data.x, data.edge_index)
+            logits, embeddings = model.forward_inference(data.x, data.edge_index, edge_attr)
 
         # Convert to numpy
         embeddings_np = embeddings.cpu().numpy()
@@ -221,31 +285,180 @@ def generate_embeddings_for_district(
                 district_id, embeddings_np.shape, len(np.unique(gat_labels_np))
             )
 
-        # Perform spectral clustering
+        # Initialize component-related variables
+        component_labels_np = None
+        component_stats = None
+
+        # Perform spectral clustering (with or without connected components)
         spectral_clusters = None
         cluster_to_label = None
         final_n_clusters = n_clusters
 
         if perform_clustering:
             try:
-                spectral_clusters, _, cluster_to_label, _ = perform_spectral_clustering_pipeline(
-                    embeddings=embeddings_np,
-                    features=original_features,
-                    adjacency_matrix=adjacency_matrix,
-                    gat_labels=gat_labels_np,
-                    n_clusters=n_clusters,
-                    embedding_weight=0.5,
-                    feature_weight=0.3,
-                    distance_weight=0.2,
-                    distance_scale=100.0,  # Adjust based on distance units
-                    random_state=42
+                # Load spectral clustering configuration
+                config_path = Path(__file__).parent / 'training_config.yaml'
+                if config_path.exists():
+                    with open(config_path, 'r', encoding='utf-8') as f:
+                        full_config = yaml.safe_load(f)
+                    spectral_config = full_config.get('spectral_clustering', {})
+                    embedding_weight = spectral_config.get('embedding_weight', 0.3)
+                    feature_weight = spectral_config.get('feature_weight', 0.5)
+                    distance_weight = spectral_config.get('distance_weight', 0.2)
+                    distance_scale = spectral_config.get('distance_scale', 100.0)
+                    use_confidence_weighted = spectral_config.get('use_confidence_weighted_voting', True)
+                    min_component_size = spectral_config.get('min_component_size', 3)
+                    min_cluster_size = spectral_config.get('min_cluster_size', 5)
+                    max_hops = spectral_config.get('max_hops', 3)
+                    logger.info(
+                        "Loaded spectral clustering config: emb=%.2f, feat=%.2f, dist=%.2f, "
+                        "conf_weighted=%s, min_comp_size=%d, min_cluster_size=%d, max_hops=%d",
+                        embedding_weight, feature_weight, distance_weight, 
+                        use_confidence_weighted, min_component_size, min_cluster_size, max_hops
+                    )
+                else:
+                    # Use default values
+                    embedding_weight = 0.3
+                    feature_weight = 0.5
+                    distance_weight = 0.2
+                    distance_scale = 100.0
+                    use_confidence_weighted = True
+                    min_component_size = 3
+                    min_cluster_size = 5
+                    max_hops = 3
+                    logger.warning("Config file not found, using default spectral clustering parameters")
+
+                # Use connected component separation to ensure spatial contiguity
+                logger.info("Using connected component separation for district %d", district_id)
+
+                # Step 1: Identify connected components
+                component_labels, num_components = get_connected_components(
+                    data.edge_index, 
+                    data.num_nodes
                 )
+                component_labels_np = component_labels.cpu().numpy()
+
+                # Get component statistics
+                component_stats = get_component_statistics(
+                    component_labels_np,
+                    building_ids=building_ids_in_matrix,
+                    voronoi_areas=voronoi_areas
+                )
+
+                logger.info(f"  Found {num_components} connected components")
+                for stat in component_stats:
+                    area_info = f", area={stat['total_area_km2']:.2f}km²" if 'total_area_km2' in stat else ""
+                    logger.info(f"    Component {stat['component_id']}: {stat['num_buildings']} buildings{area_info}")
+
+                # Step 2: Process each component independently
+                component_results = []
+
+                for comp_id in range(num_components):
+                    comp_mask = (component_labels_np == comp_id)
+                    comp_size = comp_mask.sum()
+
+                    logger.debug(f"  Processing component {comp_id} ({comp_size} buildings)...")
+
+                    # Extract component data
+                    comp_data, node_mapping = extract_subgraph(data, comp_mask, building_ids_in_matrix)
+                    comp_data = comp_data.to(device)
+
+                    # Extract edge_attr if available and ensure it's on the correct device
+                    comp_edge_attr = None
+                    if hasattr(comp_data, 'edge_attr') and comp_data.edge_attr is not None:
+                        comp_edge_attr = comp_data.edge_attr.to(device)
+
+                    # GAT forward pass for this component
+                    with torch.no_grad():
+                        comp_logits, comp_embeddings = model.forward_inference(
+                            comp_data.x, comp_data.edge_index, comp_edge_attr
+                        )
+
+                    comp_embeddings_np = comp_embeddings.cpu().numpy()
+                    comp_logits_np = comp_logits.cpu().numpy()
+                    comp_gat_labels = torch.argmax(comp_logits, dim=1).cpu().numpy()
+
+                    # Decide whether to apply spectral clustering
+                    if comp_size >= min_component_size:
+                        logger.debug(f"    Applying spectral clustering...")
+
+                        # Extract component-specific data
+                        comp_building_ids = [building_ids_in_matrix[i] for i in range(len(comp_mask)) if comp_mask[i]]
+                        comp_clustering_features = clustering_features[comp_mask]
+                        comp_adjacency = extract_subgraph_from_adjacency(adjacency_matrix, comp_building_ids)
+                        comp_voronoi_areas = {bid: voronoi_areas[bid] for bid in comp_building_ids} if voronoi_areas else None
+
+                        # Spectral clustering
+                        comp_clusters, comp_final_labels, comp_cluster_to_label, _, cluster_stats = perform_spectral_clustering_pipeline(
+                            embeddings=comp_embeddings_np,
+                            features=comp_clustering_features,
+                            adjacency_matrix=comp_adjacency,
+                            gat_labels=comp_gat_labels,
+                            gat_logits=comp_logits_np,
+                            building_ids=comp_building_ids,
+                            voronoi_areas=comp_voronoi_areas,
+                            n_clusters=None,  # Auto-estimate
+                            use_confidence_weighted_voting=use_confidence_weighted,
+                            embedding_weight=embedding_weight,
+                            feature_weight=feature_weight,
+                            distance_weight=distance_weight,
+                            distance_scale=distance_scale,
+                            min_cluster_size=min_cluster_size,
+                            max_hops=max_hops,
+                            random_state=42
+                        )
+
+                        num_clusters_comp = cluster_stats['valid_clusters']
+                        logger.debug(
+                            f"    ✓ Generated {num_clusters_comp} valid clusters "
+                            f"({cluster_stats['buildings_reverted']} buildings reverted)"
+                        )
+
+                    else:
+                        # Small component: assign to category 9 (miscellaneous/small component)
+                        logger.debug(f"    Component too small (size={comp_size} < min={min_component_size}), assigning to category 9...")
+                        comp_clusters = np.zeros(comp_size, dtype=int)
+                        comp_final_labels = np.full(comp_size, 9, dtype=int)
+                        comp_cluster_to_label = {0: 9}
+                        logger.debug(f"    ✓ Assigned all {comp_size} buildings to category 9 (small component)")
+
+                    # Store results
+                    component_results.append({
+                        'component_id': comp_id,
+                        'num_nodes': comp_size,
+                        'embeddings': comp_embeddings_np,
+                        'logits': comp_logits_np,
+                        'gat_labels': comp_gat_labels,
+                        'cluster_assignments': comp_clusters,
+                        'final_labels': comp_final_labels,
+                        'node_mask': comp_mask
+                    })
+
+                # Step 3: Merge component results
+                merged = merge_component_results(component_results, component_labels_np)
+
+                # Update outputs
+                embeddings_np = merged['embeddings']
+                logits_np = merged['logits']
+                gat_labels_np = merged['gat_labels']
+                spectral_clusters = merged['cluster_assignments']
+                # Build cluster_to_label mapping (merged from all components)
+                cluster_to_label = {}
+                for result in component_results:
+                    comp_offset = 0
+                    # Find offset for this component's clusters
+                    for r in component_results[:result['component_id']]:
+                        comp_offset += (r['cluster_assignments'].max() + 1) if len(r['cluster_assignments']) > 0 else 0
+                    # Add this component's mapping with offset
+                    for local_cluster, label in enumerate(np.unique(result['final_labels'])):
+                        global_cluster = local_cluster + comp_offset
+                        cluster_to_label[global_cluster] = int(label)
 
                 final_n_clusters = len(np.unique(spectral_clusters))
 
                 logger.info(
-                    "Spectral clustering completed for district %d: %d clusters, cluster_to_label=%s",
-                    district_id, final_n_clusters, cluster_to_label
+                    "✓ Connected component separation completed for district %d: %d components → %d total clusters",
+                    district_id, num_components, final_n_clusters
                 )
 
             except Exception as exc:  # pylint: disable=broad-except
@@ -263,12 +476,15 @@ def generate_embeddings_for_district(
             data.num_nodes, 
             final_n_clusters,
             scaler,
-            has_labels
+            has_labels,
+            component_labels_np,
+            component_stats,
+            clustering_scaler
         )
 
     except Exception as exc:  # pylint: disable=broad-except
         logger.error("Failed to generate embeddings for district %d: %s", district_id, exc, exc_info=True)
-        return None, None, None, None, None, None, 0, None, scaler, False
+        return None, None, None, None, None, None, 0, None, scaler, False, None, None, clustering_scaler
 
 
 def save_embeddings(
@@ -322,9 +538,107 @@ def save_embeddings(
     with open(output_file, 'wb') as f:
         pickle.dump(data, f)
 
-    logger = get_logger()
     mode_str = " (with ground truth)" if has_ground_truth else " (inference only)"
     logger.info("Embeddings and clustering results%s saved to %s", mode_str, output_file)
+
+def update_building_predictions(
+    district_id: int,
+    district_buildings: gpd.GeoDataFrame,
+    output_dir: Path
+) -> None:
+    """
+    Update building predictions for a single district.
+    """
+    building_output_file = output_dir / 'building_predictions.gpkg'
+    if building_output_file.exists():
+        # Append to existing file
+        existing_gdf = gpd.read_file(building_output_file)
+
+        # Remove any existing records for this district (in case of re-run)
+        existing_gdf = existing_gdf[existing_gdf['district_id'] != district_id]
+
+        # Combine with new data
+        combined_gdf = pd.concat([existing_gdf, district_buildings], ignore_index=True)
+        combined_gdf.to_file(building_output_file, driver='GPKG')
+
+        logger.info("Updated GeoPackage for district %d: %d buildings (total: %d buildings)",
+                    district_id, len(district_buildings), len(combined_gdf))
+    else:
+        # Create new file
+        district_buildings.to_file(building_output_file, driver='GPKG')
+        logger.info("Created GeoPackage for district %d: %d buildings",
+                    district_id, len(district_buildings))
+
+def update_district_predictions(
+    district_id: int,
+    adjacency_dir: Path,
+    district_buildings: gpd.GeoDataFrame,
+    output_dir: Path
+) -> None:
+    """
+    Update district predictions for a single district.
+    """
+    voronoi_input_file = adjacency_dir / f'district_{district_id}_voronoi.shp'
+    voronoi_output_file = output_dir / 'voronoi_predictions.gpkg'
+
+    if not voronoi_input_file.exists():
+        logger.warning("Voronoi file not found: %s", voronoi_input_file)
+        return
+
+    try:
+        voronoi_gdf = gpd.read_file(voronoi_input_file)
+        voronoi_id_field = 'FID'
+        buildings_id_field = 'id'
+        label_field = 'gat_label'
+
+        id_to_label = dict(zip(
+            district_buildings[buildings_id_field],
+            district_buildings[label_field]
+        ))
+
+        # Map labels to voronoi elements
+        voronoi_gdf['prediction'] = voronoi_gdf[voronoi_id_field].map(id_to_label)
+        voronoi_gdf['district_id'] = district_id
+
+        # Remove elements without labels
+        voronoi_gdf = voronoi_gdf[voronoi_gdf['prediction'].notna()].copy()
+
+        if len(voronoi_gdf) == 0:
+            logger.warning("No valid voronoi elements found for district %d", district_id)
+            return
+
+        voronoi_gdf['prediction'] = voronoi_gdf['prediction'].astype(int)
+
+        # Use dissolve to merge elements with same labels
+        dissolved_gdf = voronoi_gdf.dissolve(
+            by=['district_id', 'prediction'],
+            aggfunc='first'  # Keep first value for other fields
+        ).reset_index()
+
+        logger.info(
+            "District %d: merged %d voronoi elements into %d prediction regions",
+            district_id, len(voronoi_gdf), len(dissolved_gdf)
+        )
+
+        if voronoi_output_file.exists():
+            existing_gdf = gpd.read_file(voronoi_output_file)
+            existing_gdf = existing_gdf[existing_gdf['district_id'] != district_id]
+            combined_gdf = pd.concat([existing_gdf, dissolved_gdf], ignore_index=True)
+            combined_gdf.to_file(voronoi_output_file, driver='GPKG')
+
+            logger.info(
+                "Updated voronoi prediction file for district %d: %d regions (total: %d regions)",
+                district_id, len(dissolved_gdf), len(combined_gdf)
+            )
+        else:
+            dissolved_gdf.to_file(voronoi_output_file, driver='GPKG')
+            logger.info(
+                "Created voronoi prediction file for district %d: %d regions",
+                district_id, len(dissolved_gdf)
+            )
+
+    except Exception as exc:
+        logger.error("Failed to update voronoi prediction for district %d: %s", district_id, exc, exc_info=True)
 
 
 def update_gpkg_with_district(
@@ -345,7 +659,6 @@ def update_gpkg_with_district(
         adjacency_dir: Directory containing adjacency matrices
         output_dir: Output directory for GeoPackage
     """
-    logger = get_logger()
 
     try:
         # Load building shapefile
@@ -353,7 +666,7 @@ def update_gpkg_with_district(
 
         # Find building ID field
         id_field = None
-        for possible_id in ['FID', 'OBJECTID', 'ID', 'id', 'fid', 'building_id']:
+        for possible_id in ['FID', 'OBJECTID', 'ID', 'id', 'FID', 'building_id']:
             if possible_id in buildings_gdf.columns:
                 id_field = possible_id
                 break
@@ -408,27 +721,18 @@ def update_gpkg_with_district(
         if district_buildings['spectral_cluster'].notna().any():
             district_buildings['spectral_cluster'] = district_buildings['spectral_cluster'].astype('Int64')
 
-        # Save to GeoPackage (append mode if file exists)
-        output_file = output_dir / 'building_predictions.gpkg'
+        update_building_predictions(
+            district_id=district_id,
+            district_buildings=district_buildings,
+            output_dir=output_dir
+        )
 
-        if output_file.exists():
-            # Append to existing file
-            existing_gdf = gpd.read_file(output_file)
-
-            # Remove any existing records for this district (in case of re-run)
-            existing_gdf = existing_gdf[existing_gdf['district_id'] != district_id]
-
-            # Combine with new data
-            combined_gdf = pd.concat([existing_gdf, district_buildings], ignore_index=True)
-            combined_gdf.to_file(output_file, driver='GPKG')
-
-            logger.info("Updated GeoPackage with district %d: %d buildings (total: %d buildings)", 
-                       district_id, len(district_buildings), len(combined_gdf))
-        else:
-            # Create new file
-            district_buildings.to_file(output_file, driver='GPKG')
-            logger.info("Created GeoPackage with district %d: %d buildings", 
-                       district_id, len(district_buildings))
+        update_district_predictions(
+            district_id=district_id,
+            adjacency_dir = adjacency_dir,
+            district_buildings=district_buildings,
+            output_dir=output_dir
+        )
 
     except Exception as exc:  # pylint: disable=broad-except
         logger.error("Failed to update GeoPackage for district %d: %s", district_id, exc, exc_info=True)
@@ -476,7 +780,7 @@ def main(args=None):
     logger.info("Device: %s", args.device)
 
     # Load model
-    model, _ = load_model_from_file(model_path, args.device)
+    model, _, clustering_scaler = load_model_from_file(model_path, args.device)
 
     # Get district IDs
     if args.district_ids:
@@ -518,12 +822,14 @@ def main(args=None):
             building_path=building_path,
             device=args.device,
             scaler=scaler,
+            clustering_scaler=clustering_scaler,
             perform_clustering=True,
             n_clusters=None  # Auto-detect optimal number
         )
 
         (embeddings, logits, gat_labels, spectral_clusters, 
-         cluster_to_label, original_labels, num_nodes, n_clusters, scaler, has_labels) = result
+         cluster_to_label, original_labels, num_nodes, n_clusters, scaler, has_labels,
+         component_labels, component_stats, clustering_scaler) = result
 
         if embeddings is not None:
             # Save embeddings and clustering results

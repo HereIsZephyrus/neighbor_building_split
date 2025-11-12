@@ -5,6 +5,8 @@ Following pytorch-GAT training script structure.
 
 from typing import List, Optional, Dict
 from pathlib import Path
+from datetime import datetime
+import numpy as np
 import torch
 import torch.nn as nn
 from torch.optim import Adam
@@ -13,14 +15,16 @@ from torch_geometric.data import Data
 
 from torch.utils.tensorboard import SummaryWriter
 
-from ..models.gat import GAT
-from ..data.graph_batch_sampler import create_neighbor_loader, should_use_neighbor_sampling
+from ..models import GAT
+from ..data import create_neighbor_loader, should_use_neighbor_sampling
+from ..utils import get_logger
+from ..utils.metrics import compute_f1_scores
 from .config import GATConfig
 from .smooth_loss import edge_smoothness_loss
+from .focal_loss import create_loss_function
 from .train_utils import (
     save_checkpoint,
     load_checkpoint,
-    log_metrics_to_tensorboard,
     log_model_info,
     set_random_seed,
     format_metrics,
@@ -28,9 +32,63 @@ from .train_utils import (
     EarlyStopping,
     save_training_history
 )
-from ..utils.logger import get_logger
+from .tensorborad_utils import (
+    log_metrics_to_tensorboard,
+    log_district_visualizations_to_tensorboard
+)
 
-logger = get_logger()
+logger = get_logger(__name__)
+
+
+def compute_class_weights(data_list: List[Data], num_classes: int, smoothing: str = 'sqrt') -> torch.Tensor:
+    """
+    Compute class weights from data to handle class imbalance.
+
+    Args:
+        data_list: List of graph data objects
+        num_classes: Number of classes
+        smoothing: Weighting strategy ('inverse', 'sqrt', or 'log')
+                  - 'inverse': weight = total / (num_classes * count) - strong compensation
+                  - 'sqrt': weight = sqrt(total / count) - moderate compensation (recommended)
+                  - 'log': weight = log(total / count) - mild compensation
+
+    Returns:
+        Tensor of class weights (num_classes,)
+    """
+    # Collect all labels
+    all_labels = []
+    for data in data_list:
+        all_labels.extend(data.y.cpu().numpy())
+
+    labels = np.array(all_labels)
+
+    # Count samples per class
+    class_counts = np.bincount(labels, minlength=num_classes)
+    total = len(labels)
+
+    # Avoid division by zero
+    class_counts = np.maximum(class_counts, 1)
+
+    # Compute weights based on strategy
+    if smoothing == 'inverse':
+        weights = total / (num_classes * class_counts)
+    elif smoothing == 'sqrt':
+        weights = np.sqrt(total / class_counts)
+    elif smoothing == 'log':
+        weights = np.log1p(total / class_counts)
+    else:
+        raise ValueError(f"Unknown smoothing strategy: {smoothing}")
+
+    # Log class distribution
+    logger.info("=" * 60)
+    logger.info("Class Distribution Analysis:")
+    logger.info("-" * 60)
+    for i in range(num_classes):
+        percentage = (class_counts[i] / total) * 100
+        logger.info(f"  Class {i}: {class_counts[i]:6d} samples ({percentage:5.2f}%) -> weight: {weights[i]:.4f}")
+    logger.info("=" * 60)
+
+    return torch.FloatTensor(weights)
 
 
 class Trainer:
@@ -83,8 +141,47 @@ class Trainer:
             patience=config.patience // 2
         )
 
-        # Loss function
-        self.criterion = nn.CrossEntropyLoss()  # Node classification
+        # Compute class weights to handle class imbalance
+        logger.info("Computing class weights from training data...")
+
+        # Get class weight smoothing from config (default: sqrt)
+        weight_smoothing = getattr(config, 'class_weight_smoothing', 'sqrt')
+        class_weights = compute_class_weights(
+            train_data_list, 
+            num_classes=config.num_classes,
+            smoothing=weight_smoothing
+        )
+        class_weights = class_weights.to(self.device)
+
+        # Create loss function (supports Focal Loss and Label Smoothing)
+        use_focal_loss = getattr(config, 'use_focal_loss', False)
+        focal_gamma = getattr(config, 'focal_gamma', 2.0)
+        label_smoothing = getattr(config, 'label_smoothing', 0.0)
+
+        self.criterion = create_loss_function(
+            num_classes=config.num_classes,
+            class_weights=class_weights,
+            focal_loss=use_focal_loss,
+            focal_gamma=focal_gamma,
+            label_smoothing=label_smoothing
+        )
+
+        if use_focal_loss:
+            logger.info(f"Using Focal Loss (gamma={focal_gamma}, label_smoothing={label_smoothing}) to handle class imbalance")
+        elif label_smoothing > 0:
+            logger.info(f"Using CrossEntropyLoss with label smoothing={label_smoothing}")
+        else:
+            logger.info("Using weighted CrossEntropyLoss to handle class imbalance")
+
+        # Create unweighted loss function for validation
+        self.val_criterion = create_loss_function(
+            num_classes=config.num_classes,
+            class_weights=None,  # No class weights for validation
+            focal_loss=use_focal_loss,
+            focal_gamma=focal_gamma,
+            label_smoothing=label_smoothing
+        )
+        logger.info("Validation will use unweighted loss for fair comparison across folds")
 
         # Early stopping
         self.early_stopping = EarlyStopping(
@@ -96,8 +193,14 @@ class Trainer:
         # TensorBoard writer
         self.writer = None
         if config.enable_tensorboard:
-            self.writer = SummaryWriter(log_dir=str(config.log_dir))
-            logger.info(f"TensorBoard logging to {config.log_dir}")
+            # Create subdirectory with model_identifier and timestamp
+            timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+            model_id = config.model_identifier if hasattr(config, 'model_identifier') else 'default'
+            tensorboard_subdir = Path(config.log_dir) / f"{model_id}_{timestamp}"
+            tensorboard_subdir.mkdir(parents=True, exist_ok=True)
+
+            self.writer = SummaryWriter(log_dir=str(tensorboard_subdir))
+            logger.info("TensorBoard logging to %s", tensorboard_subdir)
 
         # Training history
         self.history = {
@@ -105,10 +208,14 @@ class Trainer:
             'train_acc': [],
             'train_cls_loss': [],      # Classification loss component
             'train_smooth_loss': [],   # Smoothness loss component
+            'train_macro_f1': [],      # Macro F1 score
+            'train_micro_f1': [],      # Micro F1 score
             'val_loss': [],
             'val_acc': [],
             'val_cls_loss': [],        # Classification loss component
             'val_smooth_loss': [],     # Smoothness loss component
+            'val_macro_f1': [],        # Macro F1 score
+            'val_micro_f1': [],        # Micro F1 score
             'lr': []
         }
 
@@ -133,9 +240,18 @@ class Trainer:
         total_correct = 0
         total_samples = 0
 
+        # Collect predictions and labels for F1 computation
+        all_predictions = []
+        all_labels = []
+
         # Train on each graph
         for data in self.train_data_list:
             data = data.to(self.device)
+
+            # Check for NaN/Inf in input features
+            if torch.isnan(data.x).any() or torch.isinf(data.x).any():
+                logger.warning("NaN/Inf detected in input features, skipping this graph")
+                continue
 
             # Check if we need neighbor sampling
             if should_use_neighbor_sampling(data, threshold=self.config.node_threshold):
@@ -163,8 +279,10 @@ class Trainer:
                     )
 
                     # Spatial smoothness loss on all nodes in batch
-                    # Extract edge attributes if available
-                    edge_attr = batch.edge_attr if hasattr(batch, 'edge_attr') else None
+                    # Extract edge attributes if available and ensure it's on the correct device
+                    edge_attr = None
+                    if hasattr(batch, 'edge_attr') and batch.edge_attr is not None:
+                        edge_attr = batch.edge_attr.to(self.device)
                     loss_smooth = edge_smoothness_loss(
                         node_logits,
                         batch.edge_index,
@@ -180,8 +298,22 @@ class Trainer:
 
                     # Gradient accumulation
                     if (batch_count + 1) % self.config.gradient_accumulation_steps == 0:
-                        # Gradient clipping to prevent gradient explosion
-                        torch.nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=1.0)
+                        # Check for NaN/Inf in gradients
+                        has_nan_grad = False
+                        for name, param in self.model.named_parameters():
+                            if param.grad is not None:
+                                if torch.isnan(param.grad).any() or torch.isinf(param.grad).any():
+                                    logger.warning(f"NaN/Inf detected in gradients for {name}")
+                                    has_nan_grad = True
+                                    break
+
+                        if has_nan_grad:
+                            # Skip this update
+                            self.optimizer.zero_grad()
+                            continue
+
+                        # Gradient clipping to prevent gradient explosion (increased from 1.0 to 0.5 for stronger clipping)
+                        torch.nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=0.5)
                         self.optimizer.step()
                         self.optimizer.zero_grad()
 
@@ -201,11 +333,26 @@ class Trainer:
                         total_cls_loss += loss_cls.item() * batch.batch_size
                         total_smooth_loss += loss_smooth.item() * batch.batch_size
 
+                        # Collect predictions and labels for F1
+                        all_predictions.append(pred.cpu())
+                        all_labels.append(batch.y[:batch.batch_size].cpu())
+
                 # Final optimizer step if needed
                 if batch_count % self.config.gradient_accumulation_steps != 0:
-                    # Gradient clipping to prevent gradient explosion
-                    torch.nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=1.0)
-                    self.optimizer.step()
+                    # Check for NaN/Inf in gradients
+                    has_nan_grad = False
+                    for name, param in self.model.named_parameters():
+                        if param.grad is not None:
+                            if torch.isnan(param.grad).any() or torch.isinf(param.grad).any():
+                                logger.warning(f"NaN/Inf detected in gradients for {name}")
+                                has_nan_grad = True
+                                break
+
+                    if not has_nan_grad:
+                        # Gradient clipping to prevent gradient explosion
+                        torch.nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=0.5)
+                        self.optimizer.step()
+
                     self.optimizer.zero_grad()
 
             else:
@@ -219,7 +366,10 @@ class Trainer:
                 loss_cls = self.criterion(node_logits, data.y)
 
                 # Spatial smoothness loss
-                edge_attr = data.edge_attr if hasattr(data, 'edge_attr') else None
+                # Extract edge attributes if available and ensure it's on the correct device
+                edge_attr = None
+                if hasattr(data, 'edge_attr') and data.edge_attr is not None:
+                    edge_attr = data.edge_attr.to(self.device)
                 loss_smooth = edge_smoothness_loss(
                     node_logits,
                     data.edge_index,
@@ -232,9 +382,24 @@ class Trainer:
 
                 # Backward pass
                 loss.backward()
-                # Gradient clipping to prevent gradient explosion
-                torch.nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=1.0)
-                self.optimizer.step()
+
+                # Check for NaN/Inf in gradients
+                has_nan_grad = False
+                for name, param in self.model.named_parameters():
+                    if param.grad is not None:
+                        if torch.isnan(param.grad).any() or torch.isinf(param.grad).any():
+                            logger.warning(f"NaN/Inf detected in gradients for {name}, skipping update")
+                            has_nan_grad = True
+                            break
+
+                if not has_nan_grad:
+                    # Gradient clipping to prevent gradient explosion (increased strength from 1.0 to 0.5)
+                    torch.nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=0.5)
+                    self.optimizer.step()
+                else:
+                    # If gradients are invalid, skip this update
+                    self.optimizer.zero_grad()
+                    continue
 
                 # Metrics
                 with torch.no_grad():
@@ -253,17 +418,31 @@ class Trainer:
                     total_cls_loss += loss_cls.item() * data.num_nodes
                     total_smooth_loss += loss_smooth.item() * data.num_nodes
 
+                    # Collect predictions and labels for F1
+                    all_predictions.append(pred.cpu())
+                    all_labels.append(data.y.cpu())
+
         # Average metrics
         avg_loss = total_loss / total_samples if total_samples > 0 else 0
         avg_acc = total_correct / total_samples if total_samples > 0 else 0
         avg_cls_loss = total_cls_loss / total_samples if total_samples > 0 else 0
         avg_smooth_loss = total_smooth_loss / total_samples if total_samples > 0 else 0
 
+        # Compute F1 scores
+        if all_predictions and all_labels:
+            all_preds_tensor = torch.cat(all_predictions)
+            all_labels_tensor = torch.cat(all_labels)
+            macro_f1, micro_f1 = compute_f1_scores(all_preds_tensor, all_labels_tensor)
+        else:
+            macro_f1, micro_f1 = 0.0, 0.0
+
         metrics = {
             'loss': avg_loss,
             'accuracy': avg_acc,
             'cls_loss': avg_cls_loss,
-            'smooth_loss': avg_smooth_loss
+            'smooth_loss': avg_smooth_loss,
+            'macro_f1': macro_f1,
+            'micro_f1': micro_f1
         }
 
         return metrics
@@ -287,17 +466,24 @@ class Trainer:
         total_correct = 0
         total_samples = 0
 
+        # Collect predictions and labels for F1 computation
+        all_predictions = []
+        all_labels = []
+
         for data in self.val_data_list:
             data = data.to(self.device)
 
             # Forward pass
             node_logits = self.model(data.x, data.edge_index)
 
-            # Classification loss
-            loss_cls = self.criterion(node_logits, data.y)
+            # Classification loss (use unweighted criterion for fair evaluation)
+            loss_cls = self.val_criterion(node_logits, data.y)
 
             # Spatial smoothness loss
-            edge_attr = data.edge_attr if hasattr(data, 'edge_attr') else None
+            # Extract edge attributes if available and ensure it's on the correct device
+            edge_attr = None
+            if hasattr(data, 'edge_attr') and data.edge_attr is not None:
+                edge_attr = data.edge_attr.to(self.device)
             loss_smooth = edge_smoothness_loss(
                 node_logits,
                 data.edge_index,
@@ -318,17 +504,31 @@ class Trainer:
             total_cls_loss += loss_cls.item() * data.num_nodes
             total_smooth_loss += loss_smooth.item() * data.num_nodes
 
+            # Collect predictions and labels for F1
+            all_predictions.append(pred.cpu())
+            all_labels.append(data.y.cpu())
+
         # Average metrics
         avg_loss = total_loss / total_samples if total_samples > 0 else 0
         avg_acc = total_correct / total_samples if total_samples > 0 else 0
         avg_cls_loss = total_cls_loss / total_samples if total_samples > 0 else 0
         avg_smooth_loss = total_smooth_loss / total_samples if total_samples > 0 else 0
 
+        # Compute F1 scores
+        if all_predictions and all_labels:
+            all_preds_tensor = torch.cat(all_predictions)
+            all_labels_tensor = torch.cat(all_labels)
+            macro_f1, micro_f1 = compute_f1_scores(all_preds_tensor, all_labels_tensor)
+        else:
+            macro_f1, micro_f1 = 0.0, 0.0
+
         metrics = {
             'loss': avg_loss,
             'accuracy': avg_acc,
             'cls_loss': avg_cls_loss,
-            'smooth_loss': avg_smooth_loss
+            'smooth_loss': avg_smooth_loss,
+            'macro_f1': macro_f1,
+            'micro_f1': micro_f1
         }
 
         return metrics
@@ -358,8 +558,10 @@ class Trainer:
             # Train
             train_metrics = self.train_epoch(epoch)
 
-            # Validate
-            val_metrics = self.validate()
+            # Validate (only every val_interval epochs or on the last epoch)
+            val_metrics = {}
+            if epoch % self.config.val_interval == 0 or epoch == self.config.epochs:
+                val_metrics = self.validate()
 
             # Update learning rate
             if val_metrics:
@@ -372,6 +574,8 @@ class Trainer:
             self.history['train_acc'].append(train_metrics['accuracy'])
             self.history['train_cls_loss'].append(train_metrics['cls_loss'])
             self.history['train_smooth_loss'].append(train_metrics['smooth_loss'])
+            self.history['train_macro_f1'].append(train_metrics['macro_f1'])
+            self.history['train_micro_f1'].append(train_metrics['micro_f1'])
             self.history['lr'].append(current_lr)
 
             if val_metrics:
@@ -379,6 +583,8 @@ class Trainer:
                 self.history['val_acc'].append(val_metrics['accuracy'])
                 self.history['val_cls_loss'].append(val_metrics['cls_loss'])
                 self.history['val_smooth_loss'].append(val_metrics['smooth_loss'])
+                self.history['val_macro_f1'].append(val_metrics['macro_f1'])
+                self.history['val_micro_f1'].append(val_metrics['micro_f1'])
 
             # TensorBoard logging
             if self.writer is not None:
@@ -402,18 +608,35 @@ class Trainer:
                 best_val_acc = val_metrics['accuracy']
                 is_best = True
 
-            if epoch % self.config.checkpoint_interval == 0 or is_best:
-                checkpoint_path = Path(self.config.checkpoint_dir) / f'{self.config.model_identifier}_checkpoint_epoch_{epoch}.pth'
-                save_checkpoint(
-                    self.model,
-                    self.optimizer,
-                    self.scheduler,
-                    epoch,
-                    val_metrics if val_metrics else train_metrics,
-                    self.config,
-                    checkpoint_path,
-                    is_best=is_best
-                )
+            # Save checkpoints based on config settings
+            if self.config.enable_checkpoint_saving:
+                # Normal mode: save periodic and best checkpoints
+                if epoch % self.config.checkpoint_interval == 0 or is_best:
+                    checkpoint_path = Path(self.config.checkpoint_dir) / f'{self.config.model_identifier}_checkpoint_epoch_{epoch}.pth'
+                    save_checkpoint(
+                        self.model,
+                        self.optimizer,
+                        self.scheduler,
+                        epoch,
+                        val_metrics if val_metrics else train_metrics,
+                        self.config,
+                        checkpoint_path,
+                        is_best=is_best
+                    )
+            else:
+                # HPC tuning mode: only save best checkpoint
+                if is_best:
+                    checkpoint_path = Path(self.config.checkpoint_dir) / f'{self.config.model_identifier}_best.pt'
+                    save_checkpoint(
+                        self.model,
+                        self.optimizer,
+                        self.scheduler,
+                        epoch,
+                        val_metrics if val_metrics else train_metrics,
+                        self.config,
+                        checkpoint_path,
+                        is_best=True
+                    )
 
             # Early stopping
             if val_metrics:
@@ -421,23 +644,66 @@ class Trainer:
                     logger.info(f"Early stopping at epoch {epoch}")
                     break
 
-        # Save final checkpoint
-        final_model_dir = Path(self.config.output_root_dir) / 'models'
-        final_model_dir.mkdir(parents=True, exist_ok=True)
-        final_checkpoint_path = final_model_dir / f'{self.config.model_identifier}_final_model.pth'
-        save_checkpoint(
-            self.model,
-            self.optimizer,
-            self.scheduler,
-            epoch,
-            val_metrics if val_metrics else train_metrics,
-            self.config,
-            final_checkpoint_path
-        )
+        # Save final checkpoint (only if checkpoint saving is enabled)
+        if self.config.enable_checkpoint_saving:
+            final_model_dir = Path(self.config.output_root_dir) / 'models'
+            final_model_dir.mkdir(parents=True, exist_ok=True)
+            final_checkpoint_path = final_model_dir / f'{self.config.model_identifier}_final_model.pth'
+            save_checkpoint(
+                self.model,
+                self.optimizer,
+                self.scheduler,
+                epoch,
+                val_metrics if val_metrics else train_metrics,
+                self.config,
+                final_checkpoint_path
+            )
 
         # Save training history
         history_path = Path(self.config.checkpoint_dir) / f'{self.config.model_identifier}_training_history.json'
         save_training_history(self.history, history_path)
+
+        # Generate visualizations for final model
+        if self.writer is not None and self.config.enable_visualization:
+            logger.info("Generating final model visualizations...")
+
+            # Visualize training data
+            if self.train_data_list:
+                try:
+                    log_district_visualizations_to_tensorboard(
+                        writer=self.writer,
+                        model=self.model,
+                        data_list=self.train_data_list[:self.config.max_visualize_districts],
+                        building_path=Path(self.config.building_path),
+                        epoch=epoch,
+                        tag='train_final',
+                        max_districts=self.config.max_visualize_districts,
+                        device=str(self.device),
+                        district_path=Path(self.config.district_path) if hasattr(self.config, 'district_path') else None,
+                        adjacency_dir=Path(self.config.adjacency_dir) if hasattr(self.config, 'adjacency_dir') else None,
+                        enable_spectral_clustering=True
+                    )
+                except Exception as e:
+                    logger.error(f"Failed to generate training visualizations: {e}", exc_info=True)
+
+            # Visualize validation data
+            if self.val_data_list:
+                try:
+                    log_district_visualizations_to_tensorboard(
+                        writer=self.writer,
+                        model=self.model,
+                        data_list=self.val_data_list[:self.config.max_visualize_districts],
+                        building_path=Path(self.config.building_path),
+                        epoch=epoch,
+                        tag='val_final',
+                        max_districts=self.config.max_visualize_districts,
+                        device=str(self.device),
+                        district_path=Path(self.config.district_path) if hasattr(self.config, 'district_path') else None,
+                        adjacency_dir=Path(self.config.adjacency_dir) if hasattr(self.config, 'adjacency_dir') else None,
+                        enable_spectral_clustering=True
+                    )
+                except Exception as e:
+                    logger.error(f"Failed to generate validation visualizations: {e}", exc_info=True)
 
         # Close TensorBoard writer
         if self.writer is not None:

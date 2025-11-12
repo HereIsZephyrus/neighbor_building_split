@@ -10,10 +10,11 @@ from sklearn.preprocessing import StandardScaler
 
 from .data_utils import load_district_graph
 from ..utils.logger import get_logger
+from ..utils.feature_extractor import extract_gat_features
 from .building import BuildingDataset
 from .district import DistrictDataset
 
-logger = get_logger()
+logger = get_logger(__name__)
 
 
 class BuildingGraphDataset(Dataset):
@@ -62,7 +63,7 @@ class BuildingGraphDataset(Dataset):
         """Construct the dataset by loading adjacency matrices and building features."""
         logger.info(f"Constructing dataset for {len(self.district_dataset)} districts...")
 
-        # First pass: collect all features for standardization
+        # First pass: collect all features (including degree) for standardization
         all_features = []
         district_data = []  # Store (district_id, adjacency_df, building_df) tuples
 
@@ -83,17 +84,55 @@ class BuildingGraphDataset(Dataset):
                     logger.warning(f"No buildings found for district {district_id}")
                     continue
 
-                # Extract features (all columns except 'id' and 'label')
-                feature_cols = [col for col in buildings_df.columns 
-                               if col not in ['fid', 'OBJECTID', 'id', 'label', 'geometry']]
-
-                if not feature_cols:
-                    logger.error(f"No feature columns found for district {district_id}")
+                # Extract GAT features (height, albedo, hwratio, density)
+                try:
+                    features = extract_gat_features(buildings_df)
+                except ValueError as e:
+                    logger.error(f"Failed to extract GAT features for district {district_id}: {e}")
                     continue
 
-                features = buildings_df[feature_cols].values
-                all_features.append(features)
-                district_data.append((district_id, adjacency_df, buildings_df, feature_cols))
+                # Calculate degrees for this district
+                # Build ID to index mapping
+                if 'id' in buildings_df.columns:
+                    building_ids = buildings_df['id'].values
+                else:
+                    building_ids = buildings_df.index.values
+                id_to_idx = {bid: idx for idx, bid in enumerate(building_ids)}
+
+                # Count edges for degree calculation and compute average neighbor distance
+                num_nodes = len(buildings_df)
+                degrees = np.zeros((num_nodes, 1))
+                neighbor_distances = np.zeros((num_nodes, 1))  # Sum of distances to neighbors
+                row_ids = adjacency_df.index.tolist()
+                col_ids = adjacency_df.columns.tolist()
+
+                for i, source_id in enumerate(row_ids):
+                    if source_id not in id_to_idx:
+                        continue
+                    for j, target_id in enumerate(col_ids):
+                        if target_id not in id_to_idx:
+                            continue
+                        weight = adjacency_df.iloc[i, j]
+                        if weight > 1e-6:
+                            source_idx = id_to_idx[source_id]
+                            target_idx = id_to_idx[target_id]
+                            if source_idx != target_idx:
+                                degrees[source_idx] += 1
+                                neighbor_distances[source_idx] += weight  # Accumulate distance
+
+                # Calculate average neighbor distance (neighdis)
+                # If no neighbors (degree=0), set to default value of 50
+                neighdis = np.zeros((num_nodes, 1))
+                for idx in range(num_nodes):
+                    if degrees[idx] > 0:
+                        neighdis[idx] = neighbor_distances[idx] / degrees[idx]
+                    else:
+                        neighdis[idx] = 50.0  # Default value for isolated buildings
+
+                # Concatenate original features with degree and neighdis
+                features_with_degree_neighdis = np.hstack([features, degrees, neighdis])
+                all_features.append(features_with_degree_neighdis)
+                district_data.append((district_id, adjacency_df, buildings_df))
 
             except Exception as e:
                 logger.error(f"Failed to load data for district {district_id}: {e}")
@@ -102,17 +141,17 @@ class BuildingGraphDataset(Dataset):
         if not all_features:
             raise ValueError("No valid district data found!")
 
-        # Fit scaler on all features
+        # Fit scaler on all features (including degree and neighdis)
         all_features_concat = np.concatenate(all_features, axis=0)
         self.scaler = StandardScaler()
         self.scaler.fit(all_features_concat)
         self._num_features = all_features_concat.shape[1]
-        logger.info(f"Fitted StandardScaler on {all_features_concat.shape[0]} buildings, {self._num_features} features")
+        logger.info(f"Fitted StandardScaler on {all_features_concat.shape[0]} buildings, {self._num_features} GAT features (3 base + 1 degree + 1 neighdis)")
 
         # Second pass: construct graphs with normalized features
-        for district_id, adjacency_df, buildings_df, feature_cols in district_data:
+        for district_id, adjacency_df, buildings_df in district_data:
             try:
-                graph = self._construct_graph(district_id, adjacency_df, buildings_df, feature_cols)
+                graph = self._construct_graph(district_id, adjacency_df, buildings_df)
                 self.graphs.append(graph)
                 logger.info(f"Constructed graph for district {district_id}: "
                            f"{graph.num_nodes} nodes, {graph.edge_index.shape[1]} edges")
@@ -126,8 +165,7 @@ class BuildingGraphDataset(Dataset):
         self, 
         district_id: int, 
         adjacency_df: pd.DataFrame,
-        buildings_df: pd.DataFrame,
-        feature_cols: List[str]
+        buildings_df: pd.DataFrame
     ) -> Data:
         """
         Construct a PyG Data object for one district.
@@ -136,15 +174,13 @@ class BuildingGraphDataset(Dataset):
             district_id: District ID
             adjacency_df: DataFrame containing adjacency information
             buildings_df: DataFrame containing building information
-            feature_cols: List of feature column names
 
         Returns:
             PyG Data object
         """
-        # Extract features and normalize
-        features = buildings_df[feature_cols].values
-        features_normalized = self.scaler.transform(features)
-        x = torch.tensor(features_normalized, dtype=torch.float)
+        # Extract GAT features (will add degree feature later)
+        features = extract_gat_features(buildings_df)
+        num_nodes = len(buildings_df)
 
         # Extract labels (convert from 1-based to 0-based indexing)
         if 'label' in buildings_df.columns:
@@ -206,6 +242,39 @@ class BuildingGraphDataset(Dataset):
         else:
             # Empty graph
             edge_index = torch.empty((2, 0), dtype=torch.long)
+
+        # Calculate node degrees and average neighbor distances
+        # For each node, count the number of unique neighbors and sum distances
+        degree = np.zeros(num_nodes, dtype=np.float64)
+        neighbor_distance_sum = np.zeros(num_nodes, dtype=np.float64)
+
+        if edge_list:
+            # Count degree and accumulate distances for each node
+            for idx, (src_idx, tgt_idx) in enumerate(edge_list):
+                degree[src_idx] += 1
+                neighbor_distance_sum[src_idx] += edge_weights[idx]
+                # If this is a directed edge, also count reverse direction
+                # For undirected graphs, adjacency matrix should be symmetric
+
+        # Calculate average neighbor distance (neighdis)
+        # If no neighbors (degree=0), set to default value of 50
+        neighdis = np.zeros(num_nodes, dtype=np.float64)
+        for idx in range(num_nodes):
+            if degree[idx] > 0:
+                neighdis[idx] = neighbor_distance_sum[idx] / degree[idx]
+            else:
+                neighdis[idx] = 50.0  # Default value for isolated buildings
+
+        # Add degree and neighdis as new features
+        degree_feature = degree.reshape(-1, 1)
+        neighdis_feature = neighdis.reshape(-1, 1)
+        features_with_degree_neighdis = np.hstack([features, degree_feature, neighdis_feature])
+
+        # Normalize features including degree and neighdis
+        features_normalized = self.scaler.transform(features_with_degree_neighdis)
+        x = torch.tensor(features_normalized, dtype=torch.float)
+
+        logger.debug(f"District {district_id}: Added degree and neighdis features. Features shape: {x.shape}")
 
         # Create Data object
         data = Data(

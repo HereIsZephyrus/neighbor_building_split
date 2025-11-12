@@ -19,6 +19,7 @@ class Config:
         viz_interval: int = 1,
         debug_voronoi: bool = False,
         debug_adjacency: bool = False,
+        enable_large_district_mode: bool = False,
     ):
         """
         Initialize configuration from environment file and optional overrides.
@@ -32,6 +33,10 @@ class Config:
             viz_interval: Show visualization every N iterations
             debug_voronoi: If True, step through iterations with SPACE key
             debug_adjacency: If True, export adjacency matrix as CSV for debugging
+            enable_large_district_mode: Enable chunked processing for large districts (from .env if None)
+            max_chunk_size: Maximum dimension in pixels for chunks (from .env if None, default: 2000)
+            chunk_overlap: Overlap between chunks in pixels (from .env if None, default: 100)
+            chunk_threads: Number of parallel threads for chunk processing (from .env if None, default: 4)
         """
         load_dotenv(env_path)
 
@@ -43,7 +48,13 @@ class Config:
         self.viz_interval = viz_interval
         self.debug_voronoi = debug_voronoi
         self.debug_adjacency = debug_adjacency
+        # Chunk processing parameters (reduced for better parallelization)
+        self.max_chunk_size = int(os.getenv("MAX_CHUNK_SIZE", "1000"))  # Reduced from 2000 to enable more parallelism
+        self.chunk_overlap = int(os.getenv("CHUNK_OVERLAP", "100"))
+        self.chunk_threads = int(os.getenv("CHUNK_THREADS", "8"))  # Increased from 4 to better utilize multi-core CPUs
+        self.num_chunks = int(os.getenv("NUM_CHUNKS", "8"))  # Number of chunks to split large districts into
         self.image_dir = self.output_dir / "raw_rasters"
+        self.enable_large_district_mode = enable_large_district_mode
         if self.generate_voronoi_diagram:
             self.voronoi_dir = self.output_dir / "voronoi_diagrams"
         else:

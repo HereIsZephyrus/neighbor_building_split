@@ -1,8 +1,4 @@
-"""GAT layer implementation using PyTorch Geometric.
-
-This module wraps PyG's GATConv for consistency with the rest of the codebase.
-We use PyG's efficient implementation which follows the original GAT paper.
-"""
+"""GAT convolutional layer using PyTorch Geometric."""
 
 import torch
 import torch.nn as nn
@@ -12,26 +8,11 @@ from typing import Optional
 
 from ..utils.logger import get_logger
 
-logger = get_logger()
+logger = get_logger(__name__)
 
 
 class GATConv(nn.Module):
-    """
-    Graph Attention Convolutional Layer.
-
-    Implements multi-head attention mechanism following Veličković et al. (2018).
-    This is a wrapper around PyG's GATConv for easier customization.
-
-    Attention mechanism:
-        α_ij = softmax_j(LeakyReLU(a^T [W h_i || W h_j]))
-        h'_i = σ(Σ_j α_ij W h_j)
-
-    where:
-        - W is the learnable weight matrix
-        - a is the attention mechanism weights
-        - || denotes concatenation
-        - σ is an activation function (ELU in our case)
-    """
+    """Multi-head graph attention convolution layer (wrapper for PyG's GATConv)."""
 
     def __init__(
         self,
@@ -45,21 +26,7 @@ class GATConv(nn.Module):
         bias: bool = True,
         **kwargs
     ):
-        """
-        Initialize GAT convolutional layer.
-
-        Args:
-            in_channels: Size of input features
-            out_channels: Size of output features per head
-            heads: Number of attention heads
-            concat: If True, concatenate outputs from all heads.
-                   If False, average them.
-            negative_slope: LeakyReLU negative slope
-            dropout: Dropout probability for attention weights
-            add_self_loops: Whether to add self-loops to the graph
-            bias: Whether to use bias
-            **kwargs: Additional arguments for GATConv
-        """
+        """Initialize GAT convolution layer."""
         super().__init__()
 
         self.in_channels = in_channels
@@ -68,7 +35,6 @@ class GATConv(nn.Module):
         self.concat = concat
         self.dropout = dropout
 
-        # Use PyG's GATConv implementation
         self.conv = PyGGATConv(
             in_channels=in_channels,
             out_channels=out_channels,
@@ -81,16 +47,10 @@ class GATConv(nn.Module):
             **kwargs
         )
 
-        # Output dimension
         if concat:
             self.output_dim = out_channels * heads
         else:
             self.output_dim = out_channels
-
-        logger.debug(
-            f"Created GATConv layer: in={in_channels}, out={out_channels}, "
-            f"heads={heads}, concat={concat}, output_dim={self.output_dim}"
-        )
 
     def forward(
         self,
@@ -99,20 +59,7 @@ class GATConv(nn.Module):
         edge_attr: Optional[torch.Tensor] = None,
         return_attention_weights: bool = False
     ):
-        """
-        Forward pass.
-
-        Args:
-            x: Node features (N, in_channels)
-            edge_index: Edge indices (2, E)
-            edge_attr: Optional edge attributes (E,) - currently not used by GATConv
-            return_attention_weights: Whether to return attention weights
-
-        Returns:
-            out: Output node features (N, output_dim)
-            attention_weights: Optional (edge_index, attention) tuple
-        """
-        # PyG's GATConv handles the attention mechanism internally
+        """Forward pass with multi-head attention."""
         if return_attention_weights:
             out, (edge_index_with_self_loops, attention_weights) = self.conv(
                 x, edge_index, return_attention_weights=True

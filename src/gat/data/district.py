@@ -5,7 +5,7 @@ class DistrictDataset:
         self.gdf = gpd.read_file(shapefile_path)
 
     def get_district_ids(self):
-        return self.gdf['FID'].unique().tolist()
+        return [int(FID) for FID in self.gdf['FID'].unique().tolist()]
 
     def get_district_geometry(self, district_id: int):
         return self.gdf[self.gdf['FID'] == district_id].geometry.iloc[0]

@@ -1,0 +1,55 @@
+# Feature Configuration for GAT + Spectral Clustering
+# This file defines which building attributes are used in different stages
+
+# GAT Features (used during training for classification)
+# These features are selected for their discriminative power in predicting building labels
+gat_features:
+  - height      # Building height (meters)
+  - albedo      # Surface albedo (reflectivity)
+  - hwratio     # Height-to-width ratio
+  - area
+  - orientatio
+  # Note: 'degree' (number of neighbors) and 'neighdis' (average neighbor distance) are added automatically during graph construction
+
+# Clustering Features (used during spectral clustering for spatial grouping)
+# These features capture morphological similarity for spatial cluster formation
+# Note: Using shapefile column names (10 char limit causes abbreviations)
+clustering_features:
+  - height       # Building height (meters)
+  - area         # Building footprint area (square meters)
+  - perimeter    # Building perimeter (meters)
+  - orientatio   # Main axis orientation (degrees) - abbreviated from 'orientation'
+  - elongation   # Elongation measure
+  - concavity    # Concavity measure
+  - circularit   # Circularity measure - abbreviated from 'circularity'
+  - rectangula   # Rectangularity measure - 'radius' stored as 'rectangula'
+  - fractality   # Fractal dimension - 'factality' stored as 'fractality'
+  - rangeIndex   # Shape metric
+  # Note: 'degree' (number of neighbors) can be added during clustering if needed
+  # Note: 'density' removed - using spatial features instead
+
+# Feature Descriptions and Usage (using actual shapefile column names)
+feature_descriptions:
+  height: "Building height - used in both GAT and clustering"
+  albedo: "Surface albedo/reflectivity - GAT only (discriminative)"
+  hwratio: "Height-to-width ratio - GAT only (discriminative)"
+  degree: "Number of neighboring buildings - GAT only, added dynamically during graph construction"
+  neighdis: "Average distance to neighboring buildings - GAT only, added dynamically during graph construction"
+  area: "Building footprint area - used in both GAT and clustering"
+  perimeter: "Building perimeter - clustering only (morphological)"
+  orientatio: "Main axis orientation - clustering only (morphological)"
+  elongation: "Elongation measure - clustering only (morphological)"
+  concavity: "Concavity measure - clustering only (morphological)"
+  circularit: "Circularity measure - clustering only (morphological)"
+  rectangula: "Rectangularity measure - clustering only (morphological)"
+  fractality: "Fractal dimension - clustering only (morphological)"
+  overlapInd: "Overlap index - clustering only (spatial)"
+  rangeIndex: "Range index metric - clustering only (morphological)"
+  density: "Building density - used in both GAT and clustering"
+
+# Design Rationale:
+# - GAT features: Selected for label discrimination (what type of building?)
+# - Clustering features: Selected for spatial grouping (which buildings belong together?)
+# - This separation allows GAT to focus on classification while spectral clustering
+#   focuses on spatial smoothing based on morphological and spatial similarity
+

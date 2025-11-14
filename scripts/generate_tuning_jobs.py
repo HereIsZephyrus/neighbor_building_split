@@ -117,11 +117,11 @@ class HyperparameterGenerator:
     def _format_param_value(_key: str, value: Any) -> str:
         """
         Format parameter value for filename generation.
-        
+
         Args:
             _key: Parameter name (reserved for future use)
             value: Parameter value
-            
+
         Returns:
             Formatted string representation
         """
@@ -321,7 +321,7 @@ exit $EXIT_CODE
             config['training']['weight_decay'] = params['weight_decay']
         if 'lambda_smooth' in params:
             config['training']['lambda_smooth'] = params['lambda_smooth']
-        
+
         # Update weight components for spectral clustering if present
         if 'weight_components' in params:
             weights = params['weight_components']

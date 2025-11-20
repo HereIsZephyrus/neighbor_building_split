@@ -84,10 +84,11 @@ class GATConfig:
     spectral_feature_weight: float = 0.5  # Weight for morphological feature similarity
     spectral_distance_weight: float = 0.2  # Weight for spatial distance affinity
     spectral_distance_scale: float = 100.0  # Distance-to-affinity conversion scale (meters)
-    spectral_oversample_factor: float = 1.5  # Cluster oversampling factor
+    spectral_oversample_factor: float = 1.0  # Cluster oversampling factor
+    spectral_min_component_size: int = 3  # Minimum component size for spectral clustering
+    spectral_min_cluster_size: int = 5  # Minimum cluster size (smaller clusters revert to GAT)
+    spectral_max_hops: int = 2  # Maximum graph hops for clustering
     spectral_use_confidence_weighted_voting: bool = False  # Use confidence-weighted voting
-    spectral_confidence_threshold_high: float = 0.8  # High confidence threshold
-    spectral_confidence_threshold_low: float = 0.5  # Low confidence threshold
 
     def __post_init__(self):
         """Post-initialization validation and path conversion."""
@@ -110,8 +111,6 @@ class GATConfig:
         weight_sum = self.spectral_embedding_weight + self.spectral_feature_weight + self.spectral_distance_weight
         assert abs(weight_sum - 1.0) < 1e-6, f"Spectral clustering weights must sum to 1.0, got {weight_sum:.4f}"
         assert self.spectral_distance_scale > 0, "spectral_distance_scale must be positive"
-        assert 0 < self.spectral_confidence_threshold_low < self.spectral_confidence_threshold_high <= 1.0, \
-            "Confidence thresholds must satisfy 0 < low < high <= 1.0"
 
     def to_dict(self) -> dict:
         """Convert config to dictionary."""
@@ -225,9 +224,10 @@ class GATConfig:
             'spectral_distance_weight': spectral_params.get('distance_weight'),
             'spectral_distance_scale': spectral_params.get('distance_scale'),
             'spectral_oversample_factor': spectral_params.get('oversample_factor'),
+            'spectral_min_component_size': spectral_params.get('min_component_size'),
+            'spectral_min_cluster_size': spectral_params.get('min_cluster_size'),
+            'spectral_max_hops': spectral_params.get('max_hops'),
             'spectral_use_confidence_weighted_voting': spectral_params.get('use_confidence_weighted_voting'),
-            'spectral_confidence_threshold_high': spectral_params.get('confidence_threshold_high'),
-            'spectral_confidence_threshold_low': spectral_params.get('confidence_threshold_low'),
         })
 
         # Filter out None values - let dataclass use its defaults

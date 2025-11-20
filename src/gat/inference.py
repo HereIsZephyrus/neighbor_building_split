@@ -21,12 +21,12 @@ from .data.data_utils import load_district_graph
 from .utils.logger import setup_logger, get_logger
 from .utils.spectral_clustering import perform_spectral_clustering_pipeline
 from .utils.feature_extractor import extract_clustering_features
-from .utils.graph_utils import get_connected_components
 from .utils.graph_utils_ext import (
     extract_subgraph,
     extract_subgraph_from_adjacency,
     merge_component_results,
-    get_component_statistics
+    get_component_statistics,
+    get_connected_components_from_adjacency
 )
 
 logger = get_logger(__name__)
@@ -310,11 +310,12 @@ def generate_embeddings_for_district(
                     min_component_size = spectral_config.get('min_component_size', 3)
                     min_cluster_size = spectral_config.get('min_cluster_size', 5)
                     max_hops = spectral_config.get('max_hops', 3)
+                    oversample_factor = spectral_config.get('oversample_factor', 1)
                     logger.info(
                         "Loaded spectral clustering config: emb=%.2f, feat=%.2f, dist=%.2f, "
-                        "conf_weighted=%s, min_comp_size=%d, min_cluster_size=%d, max_hops=%d",
+                        "conf_weighted=%s, min_comp_size=%d, min_cluster_size=%d, max_hops=%d, oversample=%.2f",
                         embedding_weight, feature_weight, distance_weight, 
-                        use_confidence_weighted, min_component_size, min_cluster_size, max_hops
+                        use_confidence_weighted, min_component_size, min_cluster_size, max_hops, oversample_factor
                     )
                 else:
                     # Use default values
@@ -326,17 +327,19 @@ def generate_embeddings_for_district(
                     min_component_size = 3
                     min_cluster_size = 5
                     max_hops = 3
+                    oversample_factor = 1
                     logger.warning("Config file not found, using default spectral clustering parameters")
 
                 # Use connected component separation to ensure spatial contiguity
                 logger.info("Using connected component separation for district %d", district_id)
 
-                # Step 1: Identify connected components
-                component_labels, num_components = get_connected_components(
-                    data.edge_index, 
-                    data.num_nodes
+                # Step 1: CRITICAL FIX - Identify connected components based on ADJACENCY MATRIX
+                # (actual spatial Voronoi boundaries), not PyG edge_index (which may include
+                # multi-hop connections that don't represent direct spatial adjacency)
+                component_labels_np, num_components = get_connected_components_from_adjacency(
+                    adjacency_matrix,
+                    building_ids_in_matrix
                 )
-                component_labels_np = component_labels.cpu().numpy()
 
                 # Get component statistics
                 component_stats = get_component_statistics(
@@ -405,6 +408,7 @@ def generate_embeddings_for_district(
                             distance_scale=distance_scale,
                             min_cluster_size=min_cluster_size,
                             max_hops=max_hops,
+                            oversample_factor=oversample_factor,
                             random_state=42
                         )
 
@@ -769,7 +773,7 @@ def main(args=None):
     # Setup logger
     output_dir.mkdir(parents=True, exist_ok=True)
     log_file = output_dir / 'inference.log'
-    logger = setup_logger(name='gat', log_file=log_file)
+    logger = setup_logger(log_file=log_file)
 
     logger.info("=" * 80)
     logger.info("GAT Inference: Generating Embeddings")

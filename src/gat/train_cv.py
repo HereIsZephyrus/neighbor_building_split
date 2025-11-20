@@ -201,7 +201,7 @@ def train_cross_validation_mpi(config, dataset, args):
                 import torch
                 device = torch.device(fold_config.device if hasattr(fold_config, 'device') else 'cuda' if torch.cuda.is_available() else 'cpu')
 
-                best_checkpoint_path = Path(fold_config.checkpoint_dir) / f"{fold_config.model_identifier}_best.pt"
+                best_checkpoint_path = Path(fold_config.checkpoint_dir) / "best.pt"
                 if best_checkpoint_path.exists():
                     checkpoint = torch.load(best_checkpoint_path, map_location=device)
                     model.load_state_dict(checkpoint['model_state_dict'])

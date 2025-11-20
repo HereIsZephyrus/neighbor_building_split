@@ -68,49 +68,6 @@ def similarity_matrix_to_edge_index(
     return edge_index, edge_attr
 
 
-def get_connected_components(edge_index: torch.Tensor, num_nodes: int) -> Tuple[torch.Tensor, int]:
-    """
-    Find connected components in the graph.
-
-    Args:
-        edge_index: Edge index tensor of shape (2, E)
-        num_nodes: Number of nodes
-
-    Returns:
-        component_labels: Tensor of shape (N,) with component ID for each node
-        num_components: Number of connected components
-    """
-    # Use DFS to find connected components
-    visited = torch.zeros(num_nodes, dtype=torch.bool)
-    component_labels = torch.zeros(num_nodes, dtype=torch.long)
-    current_component = 0
-
-    # Build adjacency list
-    adj_list = [[] for _ in range(num_nodes)]
-    for i in range(edge_index.shape[1]):
-        src, dst = edge_index[0, i].item(), edge_index[1, i].item()
-        adj_list[src].append(dst)
-        adj_list[dst].append(src)
-
-    # DFS
-    def dfs(node, component):
-        visited[node] = True
-        component_labels[node] = component
-        for neighbor in adj_list[node]:
-            if not visited[neighbor]:
-                dfs(neighbor, component)
-
-    # Find all components
-    for node in range(num_nodes):
-        if not visited[node]:
-            dfs(node, current_component)
-            current_component += 1
-
-    logger.debug(f"Found {current_component} connected components")
-
-    return component_labels, current_component
-
-
 def global_pool(x: torch.Tensor, method: str = 'mean_max') -> torch.Tensor:
     """
     Global pooling over all nodes in a graph.

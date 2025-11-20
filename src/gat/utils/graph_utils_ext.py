@@ -111,6 +111,9 @@ def merge_component_results(
     """
     Merge results from multiple connected components back into original order.
 
+    Critical: Only offsets valid (non-negative) cluster IDs to prevent filtered clusters
+    from being visualized across different connected components.
+
     Args:
         component_results: List of result dicts from each component
         original_order: Mapping from component results to original indices
@@ -143,12 +146,23 @@ def merge_component_results(
         merged['logits'][current_idx:end_idx] = result['logits']
         merged['gat_labels'][current_idx:end_idx] = result['gat_labels']
 
-        # Offset cluster IDs to avoid conflicts between components
-        merged['cluster_assignments'][current_idx:end_idx] = result['cluster_assignments'] + cluster_offset
+        # CRITICAL FIX: Offset cluster IDs ONLY for valid (non-negative) clusters
+        # Keep negative IDs (filtered/invalid clusters) unchanged to prevent
+        # cross-component visualization artifacts
+        comp_cluster_assignments = result['cluster_assignments'].copy()
+        valid_mask = comp_cluster_assignments >= 0
+        comp_cluster_assignments[valid_mask] += cluster_offset
+
+        merged['cluster_assignments'][current_idx:end_idx] = comp_cluster_assignments
         merged['final_labels'][current_idx:end_idx] = result['final_labels']
         merged['component_id'][current_idx:end_idx] = comp_id
 
-        cluster_offset += (result['cluster_assignments'].max() + 1) if len(result['cluster_assignments']) > 0 else 0
+        # Update offset based on maximum VALID cluster ID only
+        # This ensures negative IDs stay negative across all components
+        valid_clusters = result['cluster_assignments'][result['cluster_assignments'] >= 0]
+        if len(valid_clusters) > 0:
+            cluster_offset += (valid_clusters.max() + 1)
+
         current_idx = end_idx
 
     return merged
@@ -193,3 +207,54 @@ def get_component_statistics(
 
     return stats
 
+
+def get_connected_components_from_adjacency(
+    adjacency_matrix: pd.DataFrame,
+    building_ids: List[int] = None  # noqa: ARG001 - kept for API consistency
+) -> Tuple[np.ndarray, int]:
+    """
+    Find connected components based on adjacency matrix (Voronoi spatial adjacency).
+
+    This ensures components are based on actual spatial contiguity (buildings sharing
+    Voronoi boundaries), not GAT's edge_index which may include multi-hop connections.
+
+    Critical: This is the correct way to identify spatially contiguous groups of buildings
+    for spectral clustering. Using PyG's edge_index leads to incorrect component separation
+    because it may connect spatially distant buildings through intermediate nodes.
+
+    Args:
+        adjacency_matrix: Distance-based adjacency matrix (N, N) where non-zero values
+                         indicate adjacent buildings (sharing Voronoi boundaries)
+        building_ids: List of building IDs (optional, kept for API consistency)
+
+    Returns:
+        component_labels: Array of shape (N,) with component ID for each building
+        num_components: Number of connected components
+
+    Example:
+        If adjacency shows buildings [0,1,2] form one group and [3,4] form another:
+        - component_labels = [0, 0, 0, 1, 1]
+        - num_components = 2
+    """
+    from scipy.sparse import csr_matrix
+    from scipy.sparse.csgraph import connected_components
+
+    # Create binary adjacency matrix (1 if adjacent, 0 otherwise)
+    # This is based on actual spatial adjacency (Voronoi boundaries)
+    adjacency_binary = (adjacency_matrix.values > 0).astype(int)
+
+    # Ensure symmetry (should already be symmetric, but enforce it)
+    adjacency_binary = np.maximum(adjacency_binary, adjacency_binary.T)
+
+    # Convert to sparse matrix for efficient computation
+    sparse_adj = csr_matrix(adjacency_binary)
+
+    # Find connected components using scipy
+    # directed=False because spatial adjacency is undirected
+    num_components, component_labels = connected_components(
+        csgraph=sparse_adj,
+        directed=False,
+        return_labels=True
+    )
+
+    return component_labels, num_components

@@ -134,12 +134,27 @@ class Trainer:
             weight_decay=config.weight_decay
         )
 
-        self.scheduler = ReduceLROnPlateau(
-            self.optimizer,
-            mode='max',
-            factor=0.5,
-            patience=config.patience // 2
-        )
+        # Setup learning rate scheduler based on whether we have validation data
+        if val_data_list is not None and len(val_data_list) > 0:
+            # With validation: use validation accuracy for scheduling
+            self.scheduler = ReduceLROnPlateau(
+                self.optimizer,
+                mode='max',  # Maximize validation accuracy
+                factor=0.5,
+                patience=config.patience // 2
+            )
+            self.scheduler_metric = 'val_acc'
+            logger.info("Learning rate scheduler: ReduceLROnPlateau based on validation accuracy")
+        else:
+            # Without validation (final training): use training loss for scheduling
+            self.scheduler = ReduceLROnPlateau(
+                self.optimizer,
+                mode='min',  # Minimize training loss
+                factor=0.5,
+                patience=config.patience // 3  # More aggressive for training loss
+            )
+            self.scheduler_metric = 'train_loss'
+            logger.info("Learning rate scheduler: ReduceLROnPlateau based on training loss (no validation set)")
 
         # Compute class weights to handle class imbalance
         logger.info("Computing class weights from training data...")
@@ -183,12 +198,25 @@ class Trainer:
         )
         logger.info("Validation will use unweighted loss for fair comparison across folds")
 
-        # Early stopping
-        self.early_stopping = EarlyStopping(
-            patience=config.patience,
-            min_delta=config.min_delta,
-            mode='max'  # Maximize accuracy
-        )
+        # Early stopping based on whether we have validation data
+        if val_data_list is not None and len(val_data_list) > 0:
+            # With validation: monitor validation accuracy
+            self.early_stopping = EarlyStopping(
+                patience=config.patience,
+                min_delta=config.min_delta,
+                mode='max'  # Maximize accuracy
+            )
+            self.early_stopping_metric = 'val_acc'
+            logger.info("Early stopping: monitoring validation accuracy")
+        else:
+            # Without validation (final training): monitor training loss
+            self.early_stopping = EarlyStopping(
+                patience=config.patience,
+                min_delta=config.min_delta,
+                mode='min'  # Minimize training loss
+            )
+            self.early_stopping_metric = 'train_loss'
+            logger.info("Early stopping: monitoring training loss (no validation set)")
 
         # TensorBoard writer
         self.writer = None
@@ -563,9 +591,11 @@ class Trainer:
             if epoch % self.config.val_interval == 0 or epoch == self.config.epochs:
                 val_metrics = self.validate()
 
-            # Update learning rate
-            if val_metrics:
+            # Update learning rate based on scheduler metric
+            if self.scheduler_metric == 'val_acc' and val_metrics:
                 self.scheduler.step(val_metrics['accuracy'])
+            elif self.scheduler_metric == 'train_loss':
+                self.scheduler.step(train_metrics['loss'])
 
             # Log metrics
             current_lr = get_lr(self.optimizer)
@@ -626,7 +656,7 @@ class Trainer:
             else:
                 # HPC tuning mode: only save best checkpoint
                 if is_best:
-                    checkpoint_path = Path(self.config.checkpoint_dir) / f'{self.config.model_identifier}_best.pt'
+                    checkpoint_path = Path(self.config.checkpoint_dir) / 'best.pt'
                     save_checkpoint(
                         self.model,
                         self.optimizer,
@@ -638,11 +668,16 @@ class Trainer:
                         is_best=True
                     )
 
-            # Early stopping
-            if val_metrics:
-                if self.early_stopping(val_metrics['accuracy']):
-                    logger.info(f"Early stopping at epoch {epoch}")
-                    break
+            # Early stopping based on monitoring metric
+            should_stop = False
+            if self.early_stopping_metric == 'val_acc' and val_metrics:
+                should_stop = self.early_stopping(val_metrics['accuracy'])
+            elif self.early_stopping_metric == 'train_loss':
+                should_stop = self.early_stopping(train_metrics['loss'])
+
+            if should_stop:
+                logger.info(f"Early stopping at epoch {epoch} (monitoring {self.early_stopping_metric})")
+                break
 
         # Save final checkpoint (only if checkpoint saving is enabled)
         if self.config.enable_checkpoint_saving:

@@ -21,11 +21,11 @@ from shapely.geometry import MultiPoint
 from ..utils import get_logger
 from ..utils.spectral_clustering import perform_spectral_clustering_pipeline
 from ..utils.feature_extractor import extract_clustering_features
-from ..utils.graph_utils import get_connected_components
 from ..utils.graph_utils_ext import (
     extract_subgraph,
     extract_subgraph_from_adjacency,
-    merge_component_results
+    merge_component_results,
+    get_connected_components_from_adjacency
 )
 
 matplotlib.use('Agg')  # Use non-interactive backend
@@ -169,48 +169,59 @@ def visualize_district_predictions(
         # Draw convex hulls for each cluster
         if spectral_clusters is not None:
             unique_clusters = np.unique(spectral_clusters)
-            # Use a colorblind-friendly palette for cluster boundaries
-            cluster_colors = plt.cm.Dark2(np.linspace(0, 1, len(unique_clusters)))
+            # Filter out negative cluster IDs (filtered/invalid clusters)
+            valid_clusters = unique_clusters[unique_clusters >= 0]
 
-            for cluster_id, color in zip(unique_clusters, cluster_colors):
-                # Get all buildings in this cluster
-                cluster_mask = gdf_spectral['cluster'] == cluster_id
-                cluster_buildings = gdf_spectral[cluster_mask]
+            if len(valid_clusters) == 0:
+                logger.debug("No valid clusters to visualize (all filtered)")
+            else:
+                # Use a colorblind-friendly palette for cluster boundaries
+                cluster_colors = plt.cm.Dark2(np.linspace(0, 1, len(valid_clusters)))
 
-                if len(cluster_buildings) < 3:
-                    # Need at least 3 points for a convex hull, skip if too few
-                    continue
+                for cluster_id, color in zip(valid_clusters, cluster_colors):
+                    # Get all buildings in this cluster
+                    cluster_mask = gdf_spectral['cluster'] == cluster_id
+                    cluster_buildings = gdf_spectral[cluster_mask]
 
-                try:
-                    # Get all building centroids for this cluster
-                    points = [geom.centroid for geom in cluster_buildings.geometry]
+                    if len(cluster_buildings) < 3:
+                        # Need at least 3 points for a convex hull, skip if too few
+                        continue
 
-                    # Create MultiPoint and compute convex hull
-                    multi_point = MultiPoint(points)
-                    convex_hull = multi_point.convex_hull
+                    try:
+                        # Get all building centroids for this cluster
+                        points = [geom.centroid for geom in cluster_buildings.geometry]
 
-                    # Extract coordinates for plotting
-                    if convex_hull.geom_type == 'Polygon':
-                        x, y = convex_hull.exterior.xy
-                        ax3.plot(x, y, color=color, linewidth=2.5, alpha=0.8, 
-                                linestyle='-', zorder=100)
-                        # Add a subtle fill
-                        ax3.fill(x, y, color=color, alpha=0.1, zorder=50)
-                    elif convex_hull.geom_type == 'LineString':
-                        # If only 2 points, it's a line
-                        x, y = convex_hull.xy
-                        ax3.plot(x, y, color=color, linewidth=2.5, alpha=0.8,
-                                linestyle='-', zorder=100)
+                        # Create MultiPoint and compute convex hull
+                        multi_point = MultiPoint(points)
+                        convex_hull = multi_point.convex_hull
 
-                except Exception as e:
-                    logger.debug(f"Failed to compute convex hull for cluster {cluster_id}: {e}")
-                    continue
+                        # Extract coordinates for plotting
+                        if convex_hull.geom_type == 'Polygon':
+                            x, y = convex_hull.exterior.xy
+                            ax3.plot(x, y, color=color, linewidth=2.5, alpha=0.8, 
+                                    linestyle='-', zorder=100)
+                            # Add a subtle fill
+                            ax3.fill(x, y, color=color, alpha=0.1, zorder=50)
+                        elif convex_hull.geom_type == 'LineString':
+                            # If only 2 points, it's a line
+                            x, y = convex_hull.xy
+                            ax3.plot(x, y, color=color, linewidth=2.5, alpha=0.8,
+                                    linestyle='-', zorder=100)
+
+                    except Exception as e:
+                        logger.debug(f"Failed to compute convex hull for cluster {cluster_id}: {e}")
+                        continue
 
         ax3.set_xlim(plot_bounds[0], plot_bounds[1])
         ax3.set_ylim(plot_bounds[2], plot_bounds[3])
 
         spectral_accuracy = (spectral_predictions == ground_truth).mean() * 100
-        num_clusters = len(np.unique(spectral_clusters)) if spectral_clusters is not None else 0
+        # Count only valid clusters (non-negative IDs)
+        if spectral_clusters is not None:
+            unique_clusters = np.unique(spectral_clusters)
+            num_clusters = len(unique_clusters[unique_clusters >= 0])
+        else:
+            num_clusters = 0
         title = f'区域 {district_id}: 谱聚类\n准确率: {spectral_accuracy:.1f}%'
         if num_clusters > 0:
             title += f' ({num_clusters}个簇)'
@@ -334,6 +345,9 @@ def log_district_visualizations_to_tensorboard(
         spectral_config.setdefault('distance_scale', 100.0)
         spectral_config.setdefault('use_confidence_weighted_voting', True)
         spectral_config.setdefault('min_component_size', 3)
+        spectral_config.setdefault('min_cluster_size', 5)
+        spectral_config.setdefault('max_hops', 3)
+        spectral_config.setdefault('oversample_factor', 1)
 
     # Set model to evaluation mode
     model.eval()
@@ -443,13 +457,14 @@ def log_district_visualizations_to_tensorboard(
                             # Use connected component separation to ensure spatial contiguity
                             logger.debug(f"District {district_id}: Using connected component separation")
 
-                            # Identify connected components
-                            component_labels, num_components = get_connected_components(
-                                data_device.edge_index,
-                                data_device.num_nodes
+                            # CRITICAL FIX: Identify connected components based on ADJACENCY MATRIX
+                            # (actual spatial Voronoi boundaries), not PyG edge_index (which may include
+                            # multi-hop connections that don't represent direct spatial adjacency)
+                            component_labels_np, num_components = get_connected_components_from_adjacency(
+                                adjacency_matrix,
+                                building_ids
                             )
-                            component_labels_np = component_labels.cpu().numpy()
-                            logger.debug(f"  Found {num_components} connected components")
+                            logger.debug(f"  Found {num_components} connected components (based on spatial adjacency)")
 
                             # Process each component independently
                             component_results = []
@@ -499,6 +514,9 @@ def log_district_visualizations_to_tensorboard(
                                         feature_weight=spectral_config['feature_weight'],
                                         distance_weight=spectral_config['distance_weight'],
                                         distance_scale=spectral_config['distance_scale'],
+                                        min_cluster_size=spectral_config['min_cluster_size'],
+                                        max_hops=spectral_config['max_hops'],
+                                        oversample_factor=spectral_config['oversample_factor'],
                                         random_state=42
                                     )
                                 else:

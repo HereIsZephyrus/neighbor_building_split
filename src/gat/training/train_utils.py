@@ -57,11 +57,8 @@ def save_checkpoint(
     torch.save(checkpoint, filepath)
     logger.info("Checkpoint saved to %s (model_identifier: %s)", filepath, checkpoint['model_identifier'])
 
-    if is_best:
-        model_id = checkpoint.get('model_identifier', 'default')
-        best_path = filepath.parent / f'{model_id}_best_model.pth'
-        torch.save(checkpoint, best_path)
-        logger.info("Best model saved to %s", best_path)
+    # Note: The best checkpoint is saved via the filepath parameter above.
+    # No need for duplicate saves with different naming schemes.
 
 
 def load_checkpoint(

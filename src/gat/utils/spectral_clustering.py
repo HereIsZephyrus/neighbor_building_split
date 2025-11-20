@@ -172,16 +172,10 @@ def compute_affinity_matrix(
         distance_weight * distance_affinity
     )
 
-    logger.debug("Combined affinity contributions: emb=%.4f, feat=%.4f, dist=%.4f",
+    logger.info("Combined affinity contributions: emb=%.4f, feat=%.4f, dist=%.4f",
                  (embedding_weight * embedding_sim).mean(),
                  (feature_weight * feature_sim).mean(),
                  (distance_weight * distance_affinity[distance_affinity > 0]).mean())
-
-    # Normalize combined affinity to [0, 1] range for stability
-    affinity_min = affinity.min()
-    affinity_max = affinity.max()
-    if affinity_max > affinity_min:
-        affinity = (affinity - affinity_min) / (affinity_max - affinity_min)
 
     # Ensure symmetry (required for spectral clustering)
     affinity = (affinity + affinity.T) / 2
@@ -258,14 +252,14 @@ def filter_small_clusters(
     cluster_to_label: dict,
     gat_labels: np.ndarray,
     min_cluster_size: int = 5
-) -> Tuple[dict, np.ndarray, dict]:
+) -> Tuple[dict, np.ndarray, dict, np.ndarray]:
     """
     Filter out clusters smaller than threshold and revert to GAT predictions.
 
     For clusters with size < min_cluster_size:
     - Do not use cluster majority voting result
     - Revert buildings to original GAT predicted labels
-    - Mark these buildings as "unclustered"
+    - Mark these buildings with negative cluster IDs (for visualization exclusion)
 
     Args:
         cluster_assignments: Original cluster assignments (N,)
@@ -277,6 +271,7 @@ def filter_small_clusters(
         filtered_cluster_to_label: Filtered cluster to label mapping (only valid clusters)
         final_labels: Final labels with small clusters reverted to GAT predictions (N,)
         cluster_stats: Statistics about filtering operation (dict)
+        cleaned_cluster_assignments: Cluster assignments with small clusters marked as negative IDs (N,)
     """
     logger.debug(f"Filtering clusters with size < {min_cluster_size}")
 
@@ -305,9 +300,13 @@ def filter_small_clusters(
         for cid in valid_clusters
     }
 
-    # Build final labels array
+    # Build final labels array and cleaned cluster assignments
     final_labels = np.zeros_like(gat_labels)
+    cleaned_cluster_assignments = cluster_assignments.copy()
     revert_count = 0
+
+    # Assign negative IDs to small/filtered clusters to exclude them from visualization
+    next_invalid_id = -1
 
     for i in range(len(cluster_assignments)):
         cluster_id = cluster_assignments[i]
@@ -315,10 +314,16 @@ def filter_small_clusters(
         if cluster_id in small_clusters:
             # Small cluster: revert to GAT prediction
             final_labels[i] = gat_labels[i]
+            # Mark with negative ID for visualization exclusion
+            cleaned_cluster_assignments[i] = next_invalid_id
             revert_count += 1
         else:
             # Valid cluster: use majority voting result
             final_labels[i] = cluster_to_label[cluster_id]
+
+    # Update invalid ID counter for next small cluster
+    if revert_count > 0:
+        next_invalid_id -= 1
 
     logger.info(f"Reverted {revert_count} buildings from small clusters to GAT predictions")
 
@@ -340,7 +345,7 @@ def filter_small_clusters(
             original_label = cluster_to_label.get(cid, 'N/A')
             logger.debug(f"  Cluster {cid}: size={size}, original_label={original_label}")
 
-    return filtered_cluster_to_label, final_labels, cluster_stats
+    return filtered_cluster_to_label, final_labels, cluster_stats, cleaned_cluster_assignments
 
 
 def spectral_cluster(
@@ -508,23 +513,47 @@ def estimate_optimal_clusters(
     affinity_matrix: np.ndarray,
     max_clusters: int = 15,
     min_clusters: int = 2,
-    oversample_factor: float = 1.5
+    oversample_factor: float = 1,
+    num_buildings: Optional[int] = None,
+    min_cluster_size: Optional[int] = None
 ) -> int:
     """
     Estimate optimal number of clusters using eigenvalue analysis with oversampling.
 
     Args:
         affinity_matrix: Affinity matrix (N, N)
-        max_clusters: Maximum number of clusters to consider
-        min_clusters: Minimum number of clusters
+        max_clusters: Maximum number of clusters to consider (default 15)
+        min_clusters: Minimum number of clusters (default 2)
         oversample_factor: Multiplier for oversampling clusters (default 1.5)
+        num_buildings: Number of buildings in component (for dynamic max calculation)
+        min_cluster_size: Minimum cluster size (for dynamic max calculation)
 
     Returns:
         optimal_k: Estimated optimal number of clusters (with oversampling)
+
+    Note:
+        If num_buildings and min_cluster_size are provided, the maximum number of clusters
+        is constrained to max(1, num_buildings / (min_cluster_size * 2)) to prevent
+        over-clustering and ensure clusters are meaningful.
     """
     from scipy.linalg import eigh
 
     logger.debug("Estimating optimal number of clusters via eigenvalue analysis")
+
+    # Calculate dynamic max clusters based on component size and min_cluster_size
+    if num_buildings is not None and min_cluster_size is not None and min_cluster_size > 0:
+        # Constraint: max clusters = max(1, n / (min_cluster_size * 2))
+        # This ensures each cluster can reasonably contain min_cluster_size buildings
+        dynamic_max = max(1, int(num_buildings / (min_cluster_size * 2)))
+        max_clusters_limit = min(dynamic_max, 10, len(affinity_matrix) - 1)
+        logger.debug(
+            f"Dynamic max clusters: {dynamic_max} (n={num_buildings}, min_size={min_cluster_size}), "
+            f"final limit={max_clusters_limit}"
+        )
+    else:
+        # Fallback to fixed limit
+        max_clusters_limit = min(10, len(affinity_matrix) - 1)
+        logger.debug(f"Using fixed max clusters limit: {max_clusters_limit}")
 
     # Compute Laplacian
     degree_matrix = np.diag(affinity_matrix.sum(axis=1))
@@ -537,22 +566,20 @@ def estimate_optimal_clusters(
     eigenvalues = np.sort(eigenvalues)
 
     # Find eigengap (largest gap in first max_clusters eigenvalues)
-    # Force maximum clusters to be 10
-    max_clusters_limit = min(10, len(eigenvalues) - 1)
     eigengaps = np.diff(eigenvalues[:max_clusters_limit + 1])
 
     optimal_k_base = np.argmax(eigengaps) + 1
-    # Force minimum K = 1, maximum K = 10
-    optimal_k_base = max(1, min(optimal_k_base, 10))
+    # Force minimum K = 1, maximum K = max_clusters_limit
+    optimal_k_base = max(1, min(optimal_k_base, max_clusters_limit))
 
     # Apply oversampling
     optimal_k = int(np.round(optimal_k_base * oversample_factor))
-    # Force minimum K = 1, maximum K = 10
-    optimal_k = max(1, min(optimal_k, 10))
+    # Force minimum K = 1, maximum K = max_clusters_limit
+    optimal_k = max(1, min(optimal_k, max_clusters_limit))
 
     logger.info(
-        "Estimated optimal number of clusters: base=%d, oversampled=%d (factor=%.2f)",
-        optimal_k_base, optimal_k, oversample_factor
+        "Estimated optimal number of clusters: base=%d, oversampled=%d (factor=%.2f, max_limit=%d)",
+        optimal_k_base, optimal_k, oversample_factor, max_clusters_limit
     )
 
     return optimal_k
@@ -574,6 +601,7 @@ def perform_spectral_clustering_pipeline(
     distance_scale: float = 1.0,
     min_cluster_size: int = 5,
     max_hops: int = 3,
+    oversample_factor: float = 1,
     random_state: int = 42
 ) -> Tuple[np.ndarray, np.ndarray, dict, np.ndarray, dict]:
     """
@@ -604,6 +632,7 @@ def perform_spectral_clustering_pipeline(
         distance_scale: Scale factor for distance-to-affinity conversion in meters (default 1.0)
         min_cluster_size: Minimum buildings per cluster; smaller reverted to GAT (default 5)
         max_hops: Maximum graph hops for clustering (default 3)
+        oversample_factor: Multiplier for oversampling clusters (default 1.5)
         random_state: Random seed for reproducibility
 
     Returns:
@@ -621,6 +650,7 @@ def perform_spectral_clustering_pipeline(
     )
 
     # Step 1: Compute affinity matrix combining embeddings, features, and spatial distance
+    # This includes hop constraint which may disconnect the graph
     affinity_matrix = compute_affinity_matrix(
         embeddings=embeddings,
         features=features,
@@ -632,51 +662,136 @@ def perform_spectral_clustering_pipeline(
         max_hops=max_hops
     )
 
-    # Step 2: Estimate optimal number of clusters if not provided (with 1.5x oversampling)
-    # Oversampling helps capture fine-grained spatial structure, small clusters merged later
-    if n_clusters is None:
-        n_clusters = estimate_optimal_clusters(affinity_matrix, oversample_factor=1.5)
+    # Step 2: CRITICAL - Identify sub-connected components after hop constraint
+    # The hop constraint may have disconnected the original component into smaller pieces
+    # We need to cluster each piece independently to ensure spatial contiguity
+    from scipy.sparse import csr_matrix
+    from scipy.sparse.csgraph import connected_components as scipy_connected_components
 
-    # Step 3: Perform spectral clustering to group spatially similar buildings
-    cluster_assignments = spectral_cluster(
-        affinity_matrix=affinity_matrix,
-        n_clusters=n_clusters,
-        random_state=random_state
+    # Create binary affinity matrix (1 if connected, 0 otherwise)
+    affinity_binary = (affinity_matrix > 0).astype(int)
+    sparse_affinity = csr_matrix(affinity_binary)
+
+    # Find sub-connected components
+    num_sub_components, sub_component_labels = scipy_connected_components(
+        csgraph=sparse_affinity,
+        directed=False,
+        return_labels=True
     )
 
-    # Step 4: Assign GAT labels to clusters using majority voting
-    # Choose voting strategy based on availability of logits and configuration
-    if use_confidence_weighted_voting and gat_logits is not None:
-        logger.info("Using confidence-weighted majority voting")
-        cluster_to_label, final_labels = assign_labels_with_confidence(
-            cluster_assignments=cluster_assignments,
-            gat_labels=gat_labels,
-            gat_logits=gat_logits
-        )
-    else:
-        if use_confidence_weighted_voting and gat_logits is None:
-            logger.warning("Confidence-weighted voting requested but logits not provided, "
-                          "falling back to simple majority voting")
-        logger.info("Using simple majority voting")
-        cluster_to_label, final_labels = assign_labels_to_clusters(
-            cluster_assignments=cluster_assignments,
-            gat_labels=gat_labels
-        )
+    logger.info(
+        f"After hop constraint, found {num_sub_components} sub-connected components "
+        f"(original component split by max_hops={max_hops})"
+    )
 
-    # Step 5: Filter small clusters and revert to GAT predictions
-    filtered_cluster_to_label, final_labels, cluster_stats = filter_small_clusters(
-        cluster_assignments=cluster_assignments,
+    # Step 3: Process each sub-component independently
+    all_cluster_assignments = np.zeros(len(embeddings), dtype=int)
+    all_final_labels = np.zeros(len(embeddings), dtype=int)
+    cluster_offset = 0  # Global cluster ID offset
+
+    sub_component_stats = []
+
+    for sub_comp_id in range(num_sub_components):
+        sub_mask = (sub_component_labels == sub_comp_id)
+        sub_size = sub_mask.sum()
+
+        logger.debug(f"Processing sub-component {sub_comp_id}/{num_sub_components} with {sub_size} buildings")
+
+        # Extract sub-component data
+        sub_affinity = affinity_matrix[np.ix_(sub_mask, sub_mask)]
+        sub_gat_labels = gat_labels[sub_mask]
+        sub_gat_logits = gat_logits[sub_mask] if gat_logits is not None else None
+
+        # Estimate number of clusters for this sub-component
+        if n_clusters is None:
+            sub_n_clusters = estimate_optimal_clusters(
+                sub_affinity,
+                oversample_factor=oversample_factor,
+                num_buildings=sub_size,
+                min_cluster_size=min_cluster_size
+            )
+        else:
+            # Scale n_clusters proportionally to sub-component size
+            sub_n_clusters = max(1, int(n_clusters * sub_size / len(embeddings)))
+
+        # Only cluster if sub-component is large enough
+        if sub_size >= min_cluster_size and sub_n_clusters > 0:
+            # Perform spectral clustering on sub-component
+            sub_cluster_assignments = spectral_cluster(
+                affinity_matrix=sub_affinity,
+                n_clusters=sub_n_clusters,
+                random_state=random_state
+            )
+
+            # Assign labels to clusters using majority voting
+            if use_confidence_weighted_voting and sub_gat_logits is not None:
+                _, sub_labels = assign_labels_with_confidence(
+                    cluster_assignments=sub_cluster_assignments,
+                    gat_labels=sub_gat_labels,
+                    gat_logits=sub_gat_logits
+                )
+            else:
+                _, sub_labels = assign_labels_to_clusters(
+                    cluster_assignments=sub_cluster_assignments,
+                    gat_labels=sub_gat_labels
+                )
+
+            # Apply cluster offset to make IDs globally unique
+            sub_cluster_assignments_global = sub_cluster_assignments + cluster_offset
+            cluster_offset += (sub_cluster_assignments.max() + 1)
+
+            # Store results
+            all_cluster_assignments[sub_mask] = sub_cluster_assignments_global
+            all_final_labels[sub_mask] = sub_labels
+
+            sub_component_stats.append({
+                'sub_component_id': sub_comp_id,
+                'size': sub_size,
+                'num_clusters': len(np.unique(sub_cluster_assignments)),
+                'clustered': True
+            })
+        else:
+            # Sub-component too small: use GAT predictions directly
+            all_cluster_assignments[sub_mask] = -1  # Mark as unclustered
+            all_final_labels[sub_mask] = sub_gat_labels
+
+            sub_component_stats.append({
+                'sub_component_id': sub_comp_id,
+                'size': sub_size,
+                'num_clusters': 0,
+                'clustered': False
+            })
+
+            logger.debug(f"Sub-component {sub_comp_id} too small ({sub_size} < {min_cluster_size}), using GAT predictions")
+
+    # Log sub-component statistics
+    total_clustered = sum(1 for s in sub_component_stats if s['clustered'])
+    logger.info(f"Clustered {total_clustered}/{num_sub_components} sub-components")
+
+    # Step 4: Filter small clusters globally and revert to GAT predictions
+    # Build global cluster_to_label mapping
+    cluster_to_label = {}
+    for i, assignment in enumerate(all_cluster_assignments):
+        if assignment >= 0:  # Valid cluster
+            if assignment not in cluster_to_label:
+                cluster_to_label[assignment] = all_final_labels[i]
+
+    filtered_cluster_to_label, final_labels, cluster_stats, cleaned_cluster_assignments = filter_small_clusters(
+        cluster_assignments=all_cluster_assignments,
         cluster_to_label=cluster_to_label,
         gat_labels=gat_labels,
         min_cluster_size=min_cluster_size
     )
 
     logger.info(
-        "Spectral clustering completed: %d total clusters, %d valid (size >= %d), %d buildings reverted",
+        "Spectral clustering completed: %d sub-components, %d total clusters, %d valid (size >= %d), %d buildings reverted",
+        num_sub_components,
         cluster_stats['total_clusters'],
         cluster_stats['valid_clusters'],
         min_cluster_size,
         cluster_stats['buildings_reverted']
     )
 
-    return cluster_assignments, final_labels, filtered_cluster_to_label, affinity_matrix, cluster_stats
+    # Return cleaned cluster assignments (with negative IDs for filtered clusters)
+    # This ensures visualization only shows valid clusters
+    return cleaned_cluster_assignments, final_labels, filtered_cluster_to_label, affinity_matrix, cluster_stats

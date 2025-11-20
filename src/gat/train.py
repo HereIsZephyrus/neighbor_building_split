@@ -7,8 +7,8 @@ Usage:
 import argparse
 import sys
 from pathlib import Path
-from datetime import datetime
 import shutil
+import logging
 import yaml
 
 from .training import GATConfig
@@ -189,7 +189,7 @@ def main(args=None):
     else:
         log_file = Path(config.log_dir) / f"{config.model_identifier}_training_rank{rank}.log"
 
-    logger = setup_logger(name='gat', log_file=log_file)
+    logger = setup_logger(log_file=log_file, level=logging.DEBUG)
 
     logger.info("=" * 80)
     logger.info("GAT Training for Building Clustering")

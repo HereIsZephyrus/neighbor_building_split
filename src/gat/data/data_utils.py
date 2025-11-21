@@ -56,26 +56,61 @@ def load_district_graph(
     building_ids_in_matrix = sim_matrix.index.tolist()
 
     # Create mapping from building ID to row index
-    # Assumes buildings_gdf has an ID field (FID, OBJECTID, etc.)
-    id_field = None
-    for possible_id in ['FID', 'OBJECTID', 'ID', 'id', 'FID', 'building_id']:
-        if possible_id in buildings_gdf.columns:
-            id_field = possible_id
-            break
-
-    if id_field is None:
+    # Use 'id' field as the standard building identifier
+    id_field = 'id'
+    
+    if id_field not in buildings_gdf.columns:
         logger.warning("No ID field found in buildings shapefile, using index")
         buildings_gdf['building_id'] = buildings_gdf.index
         id_field = 'building_id'
 
+    # Handle type mismatch between adjacency matrix index and shapefile ID field
+    # Adjacency matrix typically has int64 index, but shapefile might have float64
+    if buildings_gdf[id_field].dtype in ['float64', 'float32']:
+        # Convert matrix IDs to float for matching
+        building_ids_in_matrix_typed = [float(bid) for bid in building_ids_in_matrix]
+        logger.debug(f"Converting adjacency matrix IDs to float to match {id_field} type")
+    else:
+        # Keep as int
+        building_ids_in_matrix_typed = building_ids_in_matrix
+    
     # Filter to buildings in the matrix
-    buildings_gdf = buildings_gdf[buildings_gdf[id_field].isin(building_ids_in_matrix)].copy()
+    buildings_gdf = buildings_gdf[buildings_gdf[id_field].isin(building_ids_in_matrix_typed)].copy()
 
-    # Sort to match matrix order
-    buildings_gdf['_sort_key'] = buildings_gdf[id_field].map({bid: i for i, bid in enumerate(building_ids_in_matrix)})
+    # Sort to match matrix order (use typed IDs for mapping)
+    buildings_gdf['_sort_key'] = buildings_gdf[id_field].map({bid: i for i, bid in enumerate(building_ids_in_matrix_typed)})
     buildings_gdf = buildings_gdf.sort_values('_sort_key').reset_index(drop=True)
 
     logger.debug(f"Filtered buildings: {len(buildings_gdf)} buildings")
+    
+    # Check if there's a mismatch between buildings and matrix
+    if len(buildings_gdf) != len(sim_matrix):
+        logger.warning(
+            f"Mismatch between buildings ({len(buildings_gdf)}) and adjacency matrix ({len(sim_matrix)}). "
+            f"Some buildings in the matrix may not exist in the shapefile."
+        )
+        # Filter the adjacency matrix to only include buildings that exist in shapefile
+        # Need to convert back to original matrix index type (int)
+        if buildings_gdf[id_field].dtype in ['float64', 'float32']:
+            buildings_in_shapefile = [int(bid) for bid in buildings_gdf[id_field].tolist()]
+        else:
+            buildings_in_shapefile = buildings_gdf[id_field].tolist()
+        
+        mask = sim_matrix.index.isin(buildings_in_shapefile)
+        sim_matrix = sim_matrix.loc[mask, mask]
+        building_ids_in_matrix = sim_matrix.index.tolist()
+        
+        # Update typed list after filtering
+        if buildings_gdf[id_field].dtype in ['float64', 'float32']:
+            building_ids_in_matrix_typed = [float(bid) for bid in building_ids_in_matrix]
+        else:
+            building_ids_in_matrix_typed = building_ids_in_matrix
+        
+        logger.debug(f"Filtered adjacency matrix to {len(sim_matrix)} buildings")
+        
+        # Re-sort buildings to match filtered matrix
+        buildings_gdf['_sort_key'] = buildings_gdf[id_field].map({bid: i for i, bid in enumerate(building_ids_in_matrix_typed)})
+        buildings_gdf = buildings_gdf.sort_values('_sort_key').reset_index(drop=True)
 
     # Extract GAT features (now includes neighdis placeholder)
     features = extract_gat_features(buildings_gdf)

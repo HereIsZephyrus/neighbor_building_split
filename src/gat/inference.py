@@ -122,9 +122,25 @@ def load_model_from_file(checkpoint_path: Path, device: str) -> tuple:
     config_dict = checkpoint.get('config', {})
     model_config = config_dict.get('model', {})
 
-    # Create model
+    # Infer in_features from model state_dict if not in config
+    in_features = model_config.get('in_features', None)
+    if in_features is None:
+        # Try to infer from the first layer's weight shape
+        model_state_dict = checkpoint.get('model_state_dict', {})
+        first_layer_key = 'convs.0.conv.lin.weight'
+        if first_layer_key in model_state_dict:
+            in_features = model_state_dict[first_layer_key].shape[1]
+            logger.info("Inferred in_features=%d from model state_dict", in_features)
+        else:
+            # Fallback to default
+            in_features = 14
+            logger.warning("Could not infer in_features from checkpoint, using default=%d", in_features)
+    else:
+        logger.info("Using in_features=%d from checkpoint config", in_features)
+
+    # Create model with correct architecture
     model = GAT(
-        in_features=model_config.get('in_features', 14),
+        in_features=in_features,
         hidden_dim=model_config.get('hidden_dim', 64),
         num_classes=model_config.get('num_classes', 3),
         num_layers=model_config.get('num_layers', 3),
@@ -147,7 +163,9 @@ def load_model_from_file(checkpoint_path: Path, device: str) -> tuple:
         logger.warning("No clustering scaler found in checkpoint - will fit new scaler during inference")
 
     logger.info("Model loaded from epoch %s", checkpoint.get('epoch', 'unknown'))
-    logger.info("Model:\n%s", model)
+    logger.info("Model configuration: in_features=%d, hidden_dim=%d, num_classes=%d, num_layers=%d, num_heads=%d",
+                in_features, model_config.get('hidden_dim', 64), model_config.get('num_classes', 3),
+                model_config.get('num_layers', 3), model_config.get('num_heads', 8))
 
     return model, config_dict, clustering_scaler
 
@@ -209,18 +227,17 @@ def generate_embeddings_for_district(
         building_ids_in_matrix = adjacency_matrix.index.tolist()
 
         # Filter and sort buildings to match adjacency matrix
-        id_field = None
-        for possible_id in ['FID', 'OBJECTID', 'ID', 'id', 'building_id']:
-            if possible_id in buildings_gdf.columns:
-                id_field = possible_id
-                break
+        id_field = 'id'
 
-        if id_field is None:
-            buildings_gdf['building_id'] = buildings_gdf.index
-            id_field = 'building_id'
 
-        buildings_gdf = buildings_gdf[buildings_gdf[id_field].isin(building_ids_in_matrix)].copy()
-        buildings_gdf['_sort_key'] = buildings_gdf[id_field].map({bid: i for i, bid in enumerate(building_ids_in_matrix)})
+        # Handle type mismatch between adjacency matrix index and shapefile ID field
+        if buildings_gdf[id_field].dtype in ['float64', 'float32']:
+            building_ids_in_matrix_typed = [float(bid) for bid in building_ids_in_matrix]
+        else:
+            building_ids_in_matrix_typed = building_ids_in_matrix
+
+        buildings_gdf = buildings_gdf[buildings_gdf[id_field].isin(building_ids_in_matrix_typed)].copy()
+        buildings_gdf['_sort_key'] = buildings_gdf[id_field].map({bid: i for i, bid in enumerate(building_ids_in_matrix_typed)})
         buildings_gdf = buildings_gdf.sort_values('_sort_key').reset_index(drop=True)
 
         # Extract clustering features with standardization
@@ -551,54 +568,87 @@ def update_building_predictions(
     output_dir: Path
 ) -> None:
     """
-    Update building predictions for a single district.
+    Write building predictions for a single district to its own GeoPackage file.
+    Each district gets a separate file: district_{id}_building_predictions.gpkg
     """
-    building_output_file = output_dir / 'building_predictions.gpkg'
-    if building_output_file.exists():
-        # Append to existing file
-        existing_gdf = gpd.read_file(building_output_file)
-
-        # Remove any existing records for this district (in case of re-run)
-        existing_gdf = existing_gdf[existing_gdf['district_id'] != district_id]
-
-        # Combine with new data
-        combined_gdf = pd.concat([existing_gdf, district_buildings], ignore_index=True)
-        combined_gdf.to_file(building_output_file, driver='GPKG')
-
-        logger.info("Updated GeoPackage for district %d: %d buildings (total: %d buildings)",
-                    district_id, len(district_buildings), len(combined_gdf))
-    else:
-        # Create new file
-        district_buildings.to_file(building_output_file, driver='GPKG')
-        logger.info("Created GeoPackage for district %d: %d buildings",
-                    district_id, len(district_buildings))
+    building_output_file = output_dir / f'district_{district_id}_building_predictions.gpkg'
+    
+    # Write to district-specific file (overwrite if exists)
+    district_buildings.to_file(building_output_file, driver='GPKG')
+    logger.info("Saved building predictions for district %d: %d buildings → %s",
+                district_id, len(district_buildings), building_output_file.name)
 
 def update_district_predictions(
     district_id: int,
     adjacency_dir: Path,
     district_buildings: gpd.GeoDataFrame,
-    output_dir: Path
+    output_dir: Path,
+    buildings_id_field: str = None
 ) -> None:
     """
-    Update district predictions for a single district.
+    Write voronoi predictions for a single district to its own GeoPackage file.
+    Each district gets a separate file: district_{id}_voronoi_predictions.gpkg
+    
+    Reads from unified voronoi_diagrams.gpkg and filters by district_i field.
+    
+    Args:
+        district_id: District ID
+        adjacency_dir: Directory containing voronoi_diagrams.gpkg
+        district_buildings: GeoDataFrame with building geometries and predictions
+        output_dir: Output directory for GeoPackage files
+        buildings_id_field: ID field name used in district_buildings (if None, auto-detect)
     """
-    voronoi_input_file = adjacency_dir / f'district_{district_id}_voronoi.shp'
-    voronoi_output_file = output_dir / 'voronoi_predictions.gpkg'
+    voronoi_input_file = adjacency_dir / 'voronoi_diagrams.gpkg'
+    voronoi_output_file = output_dir / f'district_{district_id}_voronoi_predictions.gpkg'
 
     if not voronoi_input_file.exists():
-        logger.warning("Voronoi file not found: %s", voronoi_input_file)
+        logger.warning("Voronoi diagrams file not found: %s", voronoi_input_file)
         return
 
     try:
+        # Read the entire voronoi file and filter by district
+        logger.debug("Reading voronoi diagrams for district %d...", district_id)
         voronoi_gdf = gpd.read_file(voronoi_input_file)
-        voronoi_id_field = 'FID'
-        buildings_id_field = 'id'
+        
+        # Filter to this district using 'district_i' field
+        if 'district_i' not in voronoi_gdf.columns:
+            logger.error("'district_i' field not found in voronoi file. Available fields: %s", 
+                        list(voronoi_gdf.columns))
+            return
+        
+        voronoi_gdf = voronoi_gdf[voronoi_gdf['district_i'] == district_id].copy()
+        
+        if len(voronoi_gdf) == 0:
+            logger.warning("No voronoi elements found for district %d", district_id)
+            return
+        
+        logger.debug("Found %d voronoi elements for district %d", len(voronoi_gdf), district_id)
+        
+        # The building ID field in voronoi data is 'building_i'
+        voronoi_id_field = 'building_i'
+        
+        if voronoi_id_field not in voronoi_gdf.columns:
+            logger.error("'building_i' field not found in voronoi file for district %d", district_id)
+            return
+        
+        # Use provided ID field or default to 'id'
+        if buildings_id_field is None:
+            if 'id' in district_buildings.columns:
+                buildings_id_field = 'id'
+            else:
+                logger.warning("'id' field not found in district_buildings for district %d", district_id)
+                return
+        
+        logger.debug("Using ID field '%s' for voronoi mapping", buildings_id_field)
         label_field = 'gat_label'
 
-        id_to_label = dict(zip(
-            district_buildings[buildings_id_field],
-            district_buildings[label_field]
-        ))
+        # Create ID to label mapping with type conversion
+        # Voronoi building_i might be different type than buildings ID
+        id_to_label = {}
+        for bid, label in zip(district_buildings[buildings_id_field], district_buildings[label_field]):
+            # Try both int and float keys
+            id_to_label[int(bid)] = label
+            id_to_label[float(bid)] = label
 
         # Map labels to voronoi elements
         voronoi_gdf['prediction'] = voronoi_gdf[voronoi_id_field].map(id_to_label)
@@ -608,7 +658,7 @@ def update_district_predictions(
         voronoi_gdf = voronoi_gdf[voronoi_gdf['prediction'].notna()].copy()
 
         if len(voronoi_gdf) == 0:
-            logger.warning("No valid voronoi elements found for district %d", district_id)
+            logger.warning("No valid voronoi elements with predictions found for district %d", district_id)
             return
 
         voronoi_gdf['prediction'] = voronoi_gdf['prediction'].astype(int)
@@ -624,22 +674,10 @@ def update_district_predictions(
             district_id, len(voronoi_gdf), len(dissolved_gdf)
         )
 
-        if voronoi_output_file.exists():
-            existing_gdf = gpd.read_file(voronoi_output_file)
-            existing_gdf = existing_gdf[existing_gdf['district_id'] != district_id]
-            combined_gdf = pd.concat([existing_gdf, dissolved_gdf], ignore_index=True)
-            combined_gdf.to_file(voronoi_output_file, driver='GPKG')
-
-            logger.info(
-                "Updated voronoi prediction file for district %d: %d regions (total: %d regions)",
-                district_id, len(dissolved_gdf), len(combined_gdf)
-            )
-        else:
-            dissolved_gdf.to_file(voronoi_output_file, driver='GPKG')
-            logger.info(
-                "Created voronoi prediction file for district %d: %d regions",
-                district_id, len(dissolved_gdf)
-            )
+        # Write to district-specific file (overwrite if exists)
+        dissolved_gdf.to_file(voronoi_output_file, driver='GPKG')
+        logger.info("Saved voronoi predictions for district %d: %d regions → %s",
+                    district_id, len(dissolved_gdf), voronoi_output_file.name)
 
     except Exception as exc:
         logger.error("Failed to update voronoi prediction for district %d: %s", district_id, exc, exc_info=True)
@@ -668,16 +706,12 @@ def update_gpkg_with_district(
         # Load building shapefile
         buildings_gdf = gpd.read_file(building_path)
 
-        # Find building ID field
-        id_field = None
-        for possible_id in ['FID', 'OBJECTID', 'ID', 'id', 'FID', 'building_id']:
-            if possible_id in buildings_gdf.columns:
-                id_field = possible_id
-                break
-
-        if id_field is None:
-            buildings_gdf['building_id'] = buildings_gdf.index
-            id_field = 'building_id'
+        # Use 'id' field as the standard building identifier
+        id_field = 'id'
+        
+        if id_field not in buildings_gdf.columns:
+            logger.error("'id' field not found in building shapefile for district %d", district_id)
+            return
 
         # Load adjacency matrix to get building IDs for this district
         adjacency_path = adjacency_dir / f"district_{district_id}_adjacency.pkl"
@@ -703,21 +737,48 @@ def update_gpkg_with_district(
                 }
 
         # Filter buildings to only those in this district
+        # Convert building IDs to same type for matching (handle int/float mismatch)
         district_building_ids = list(building_predictions.keys())
+        
+        # Ensure ID type consistency
+        if id_field in buildings_gdf.columns:
+            # Convert adjacency matrix IDs to match shapefile ID type
+            if buildings_gdf[id_field].dtype in ['float64', 'float32']:
+                district_building_ids = [float(bid) for bid in district_building_ids]
+            else:
+                district_building_ids = [int(bid) for bid in district_building_ids]
+        
         district_buildings = buildings_gdf[buildings_gdf[id_field].isin(district_building_ids)].copy()
 
         if len(district_buildings) == 0:
             logger.warning("No buildings found for district %d", district_id)
             return
 
+        # Remove problematic fields that conflict with GeoPackage reserved names
+        # GeoPackage automatically creates 'fid' as primary key
+        columns_to_drop = []
+        for col in district_buildings.columns:
+            if col.lower() in ['fid'] and col != id_field:
+                columns_to_drop.append(col)
+        
+        if columns_to_drop:
+            logger.debug(f"Dropping conflicting columns: {columns_to_drop}")
+            district_buildings = district_buildings.drop(columns=columns_to_drop)
+
         # Add prediction columns
         district_buildings['district_id'] = district_id
-        district_buildings['gat_label'] = district_buildings[id_field].map(
-            lambda x: building_predictions.get(x, {}).get('gat_label')
-        )
-        district_buildings['spectral_cluster'] = district_buildings[id_field].map(
-            lambda x: building_predictions.get(x, {}).get('spectral_cluster')
-        )
+        
+        # Create ID mapping with type conversion
+        id_to_gat_label = {}
+        id_to_cluster = {}
+        for bid, pred in building_predictions.items():
+            # Convert key to match shapefile ID type
+            key = float(bid) if buildings_gdf[id_field].dtype in ['float64', 'float32'] else int(bid)
+            id_to_gat_label[key] = pred.get('gat_label')
+            id_to_cluster[key] = pred.get('spectral_cluster')
+        
+        district_buildings['gat_label'] = district_buildings[id_field].map(id_to_gat_label)
+        district_buildings['spectral_cluster'] = district_buildings[id_field].map(id_to_cluster)
 
         # Convert to appropriate types
         district_buildings['district_id'] = district_buildings['district_id'].astype('Int64')
@@ -733,9 +794,10 @@ def update_gpkg_with_district(
 
         update_district_predictions(
             district_id=district_id,
-            adjacency_dir = adjacency_dir,
+            adjacency_dir=adjacency_dir,
             district_buildings=district_buildings,
-            output_dir=output_dir
+            output_dir=output_dir,
+            buildings_id_field=id_field  # Pass the ID field used for gat_label mapping
         )
 
     except Exception as exc:  # pylint: disable=broad-except
@@ -887,18 +949,30 @@ def main(args=None):
     with open(summary_file, 'wb') as f:
         pickle.dump(summary, f)
 
-    # Log final GeoPackage info
-    gpkg_file = output_dir / 'building_predictions.gpkg'
-    if gpkg_file.exists():
-        final_gdf = gpd.read_file(gpkg_file)
-        logger.info("=" * 80)
-        logger.info("GeoPackage Summary:")
-        logger.info("  - Total buildings: %d", len(final_gdf))
-        logger.info("  - Districts: %s", sorted(final_gdf['district_id'].unique().tolist()))
-        logger.info("  - GAT labels: %d unique classes", final_gdf['gat_label'].nunique())
-        if final_gdf['spectral_cluster'].notna().any():
-            logger.info("  - Spectral clusters: %d unique clusters", final_gdf['spectral_cluster'].nunique())
-        logger.info("  - File: %s", gpkg_file)
+    # Log final GeoPackage info (district-specific files)
+    building_gpkg_files = list(output_dir.glob('district_*_building_predictions.gpkg'))
+    voronoi_gpkg_files = list(output_dir.glob('district_*_voronoi_predictions.gpkg'))
+    
+    logger.info("=" * 80)
+    logger.info("GeoPackage Summary:")
+    logger.info("  - Building prediction files: %d", len(building_gpkg_files))
+    logger.info("  - Voronoi prediction files: %d", len(voronoi_gpkg_files))
+    logger.info("  - Output directory: %s", output_dir)
+    
+    if len(building_gpkg_files) > 0:
+        # Count total buildings across all files
+        total_buildings = 0
+        for gpkg in building_gpkg_files[:10]:  # Sample first 10 for quick stats
+            try:
+                gdf = gpd.read_file(gpkg)
+                total_buildings += len(gdf)
+            except Exception:
+                pass
+        if len(building_gpkg_files) > 10:
+            logger.info("  - Total buildings (sampled from %d files): ~%d", 
+                       len(building_gpkg_files), total_buildings * len(building_gpkg_files) // 10)
+        else:
+            logger.info("  - Total buildings: %d", total_buildings)
 
     logger.info("=" * 80)
     logger.info("Embedding generation completed!")

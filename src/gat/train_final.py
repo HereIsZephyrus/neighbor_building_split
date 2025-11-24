@@ -277,8 +277,7 @@ def train_final_model(config, dataset, args):
                                                     )
                                                 else:
                                                     comp_clusters = np.zeros(comp_size, dtype=int)
-                                                    majority_label = np.argmax(np.bincount(comp_gat_labels))
-                                                    comp_final_labels = np.full(comp_size, majority_label, dtype=int)
+                                                    comp_final_labels = np.full(comp_size, 9, dtype=int)
 
                                                 component_results.append({
                                                     'component_id': comp_id,

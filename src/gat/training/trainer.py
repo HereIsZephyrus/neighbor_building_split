@@ -8,7 +8,6 @@ from pathlib import Path
 from datetime import datetime
 import numpy as np
 import torch
-import torch.nn as nn
 from torch.optim import Adam
 from torch.optim.lr_scheduler import ReduceLROnPlateau
 from torch_geometric.data import Data
@@ -21,7 +20,7 @@ from ..utils import get_logger
 from ..utils.metrics import compute_f1_scores
 from .config import GATConfig
 from .smooth_loss import edge_smoothness_loss
-from .focal_loss import create_loss_function
+from .similarity_loss import create_balanced_loss_function
 from .train_utils import (
     save_checkpoint,
     load_checkpoint,
@@ -140,7 +139,7 @@ class Trainer:
             self.scheduler = ReduceLROnPlateau(
                 self.optimizer,
                 mode='max',  # Maximize validation accuracy
-                factor=0.5,
+                factor=0.7,
                 patience=config.patience // 2
             )
             self.scheduler_metric = 'val_acc'
@@ -168,33 +167,49 @@ class Trainer:
         )
         class_weights = class_weights.to(self.device)
 
-        # Create loss function (supports Focal Loss and Label Smoothing)
-        use_focal_loss = getattr(config, 'use_focal_loss', False)
-        focal_gamma = getattr(config, 'focal_gamma', 2.0)
-        label_smoothing = getattr(config, 'label_smoothing', 0.0)
+        # Create balanced loss function with similarity, purity reward, and diversity penalty
+        use_similarity_loss = getattr(config, 'use_similarity_loss', True)
+        similarity_temperature = getattr(config, 'similarity_temperature', 0.1)
+        use_purity_reward = getattr(config, 'use_purity_reward', True)
+        lambda_purity = getattr(config, 'lambda_purity', 0.1)
+        use_diversity_penalty = getattr(config, 'use_diversity_penalty', True)
+        lambda_diversity = getattr(config, 'lambda_diversity', 1.0)
+        min_samples_per_class = getattr(config, 'min_samples_per_class', 2)
 
-        self.criterion = create_loss_function(
+        self.criterion = create_balanced_loss_function(
             num_classes=config.num_classes,
             class_weights=class_weights,
-            focal_loss=use_focal_loss,
-            focal_gamma=focal_gamma,
-            label_smoothing=label_smoothing
+            use_similarity_loss=use_similarity_loss,
+            similarity_temperature=similarity_temperature,
+            lambda_purity=lambda_purity if use_purity_reward else 0.0,
+            lambda_diversity=lambda_diversity if use_diversity_penalty else 0.0,
+            min_samples_per_class=min_samples_per_class
         )
 
-        if use_focal_loss:
-            logger.info(f"Using Focal Loss (gamma={focal_gamma}, label_smoothing={label_smoothing}) to handle class imbalance")
-        elif label_smoothing > 0:
-            logger.info(f"Using CrossEntropyLoss with label smoothing={label_smoothing}")
+        # Build readable loss description
+        loss_components = []
+        if use_similarity_loss:
+            loss_components.append(f"Similarity Loss (T={similarity_temperature})")
         else:
-            logger.info("Using weighted CrossEntropyLoss to handle class imbalance")
+            loss_components.append("CrossEntropy")
+
+        if use_purity_reward:
+            loss_components.append(f"Purity Reward (λ={lambda_purity})")
+
+        if use_diversity_penalty:
+            loss_components.append(f"Diversity Penalty (λ={lambda_diversity})")
+
+        logger.info("Loss function: %s with class weights", " + ".join(loss_components))
 
         # Create unweighted loss function for validation
-        self.val_criterion = create_loss_function(
+        self.val_criterion = create_balanced_loss_function(
             num_classes=config.num_classes,
             class_weights=None,  # No class weights for validation
-            focal_loss=use_focal_loss,
-            focal_gamma=focal_gamma,
-            label_smoothing=label_smoothing
+            use_similarity_loss=use_similarity_loss,
+            similarity_temperature=similarity_temperature,
+            lambda_purity=lambda_purity if use_purity_reward else 0.0,
+            lambda_diversity=lambda_diversity if use_diversity_penalty else 0.0,
+            min_samples_per_class=min_samples_per_class
         )
         logger.info("Validation will use unweighted loss for fair comparison across folds")
 

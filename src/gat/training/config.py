@@ -75,9 +75,17 @@ class GATConfig:
 
     # Loss function parameters (for handling class imbalance)
     class_weight_smoothing: str = 'sqrt'  # Class weight smoothing: 'sqrt', 'inverse', or 'log'
-    use_focal_loss: bool = False  # Whether to use Focal Loss instead of CrossEntropy
-    focal_gamma: float = 2.0  # Focal loss gamma parameter (higher = more focus on hard examples)
-    label_smoothing: float = 0.0  # Label smoothing factor (0.0-1.0, typically 0.1)
+    use_similarity_loss: bool = True  # Enable LCZ similarity-aware loss
+    similarity_temperature: float = 0.1  # Soft label temperature (0.0-0.3)
+
+    # Cluster purity reward parameters (encourage consistent predictions)
+    use_purity_reward: bool = True  # Enable cluster purity reward
+    lambda_purity: float = 0.1      # Purity reward weight (0.05-0.2, 0.1=medium)
+    min_samples_per_class: int = 2  # Minimum samples for purity calculation
+    
+    # Prediction diversity penalty (prevent majority class bias)
+    use_diversity_penalty: bool = True  # Enable diversity penalty
+    lambda_diversity: float = 1.0       # Diversity penalty weight (0.5-2.0, 1.0=medium)
 
     # Spectral Clustering Configuration (used during inference for spatial smoothing)
     spectral_embedding_weight: float = 0.3  # Weight for GAT embedding similarity
@@ -210,10 +218,18 @@ class GATConfig:
             'device': config_dict.get('device'),
 
             # Loss function parameters
-            'class_weight_smoothing': data_params.get('class_weight_smoothing'),
-            'use_focal_loss': config_dict.get('focal_loss', {}).get('enabled'),
-            'focal_gamma': config_dict.get('focal_loss', {}).get('gamma'),
-            'label_smoothing': config_dict.get('strategy', {}).get('label_smoothing'),
+            'class_weight_smoothing': training_params.get('class_weight_smoothing'),
+            'use_similarity_loss': config_dict.get('similarity_loss', {}).get('enabled'),
+            'similarity_temperature': config_dict.get('similarity_loss', {}).get('temperature'),
+
+            # Purity reward parameters
+            'use_purity_reward': config_dict.get('purity_reward', {}).get('enabled'),
+            'lambda_purity': config_dict.get('purity_reward', {}).get('lambda_purity'),
+            'min_samples_per_class': config_dict.get('purity_reward', {}).get('min_samples'),
+            
+            # Diversity penalty parameters
+            'use_diversity_penalty': config_dict.get('diversity_penalty', {}).get('enabled'),
+            'lambda_diversity': config_dict.get('diversity_penalty', {}).get('lambda_diversity'),
         }
 
         # Spectral Clustering parameters (for inference stage)

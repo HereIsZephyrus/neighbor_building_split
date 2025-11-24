@@ -289,7 +289,7 @@ def filter_small_clusters(
         else:
             valid_clusters.append(cluster_id)
 
-    logger.info(
+    logger.debug(
         f"Cluster filtering: {len(small_clusters)} small clusters (< {min_cluster_size}), "
         f"{len(valid_clusters)} valid clusters"
     )
@@ -325,7 +325,7 @@ def filter_small_clusters(
     if revert_count > 0:
         next_invalid_id -= 1
 
-    logger.info(f"Reverted {revert_count} buildings from small clusters to GAT predictions")
+    logger.debug(f"Reverted {revert_count} buildings from small clusters to GAT predictions")
 
     # Build statistics
     cluster_stats = {
@@ -424,7 +424,7 @@ def assign_labels_to_clusters(
     # Create final labels array
     final_labels = np.array([cluster_to_label[int(c)] for c in cluster_assignments])
 
-    logger.info("Assigned GAT labels to %d clusters using simple majority voting", len(cluster_to_label))
+    logger.debug("Assigned GAT labels to %d clusters using simple majority voting", len(cluster_to_label))
 
     return cluster_to_label, final_labels
 
@@ -503,7 +503,7 @@ def assign_labels_with_confidence(
     # Create final labels array
     final_labels = np.array([cluster_to_label[int(c)] for c in cluster_assignments])
 
-    logger.info("Assigned GAT labels to %d clusters using confidence-weighted voting", 
+    logger.debug("Assigned GAT labels to %d clusters using confidence-weighted voting", 
                 len(cluster_to_label))
 
     return cluster_to_label, final_labels
@@ -577,7 +577,7 @@ def estimate_optimal_clusters(
     # Force minimum K = 1, maximum K = max_clusters_limit
     optimal_k = max(1, min(optimal_k, max_clusters_limit))
 
-    logger.info(
+    logger.debug(
         "Estimated optimal number of clusters: base=%d, oversampled=%d (factor=%.2f, max_limit=%d)",
         optimal_k_base, optimal_k, oversample_factor, max_clusters_limit
     )
@@ -679,7 +679,7 @@ def perform_spectral_clustering_pipeline(
         return_labels=True
     )
 
-    logger.info(
+    logger.debug(
         f"After hop constraint, found {num_sub_components} sub-connected components "
         f"(original component split by max_hops={max_hops})"
     )
@@ -766,7 +766,7 @@ def perform_spectral_clustering_pipeline(
 
     # Log sub-component statistics
     total_clustered = sum(1 for s in sub_component_stats if s['clustered'])
-    logger.info(f"Clustered {total_clustered}/{num_sub_components} sub-components")
+    logger.debug(f"Clustered {total_clustered}/{num_sub_components} sub-components")
 
     # Step 4: Filter small clusters globally and revert to GAT predictions
     # Build global cluster_to_label mapping

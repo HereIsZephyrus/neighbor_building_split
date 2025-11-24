@@ -572,7 +572,7 @@ def update_building_predictions(
     Each district gets a separate file: district_{id}_building_predictions.gpkg
     """
     building_output_file = output_dir / f'district_{district_id}_building_predictions.gpkg'
-    
+
     # Write to district-specific file (overwrite if exists)
     district_buildings.to_file(building_output_file, driver='GPKG')
     logger.info("Saved building predictions for district %d: %d buildings → %s",
@@ -588,9 +588,9 @@ def update_district_predictions(
     """
     Write voronoi predictions for a single district to its own GeoPackage file.
     Each district gets a separate file: district_{id}_voronoi_predictions.gpkg
-    
+
     Reads from unified voronoi_diagrams.gpkg and filters by district_i field.
-    
+
     Args:
         district_id: District ID
         adjacency_dir: Directory containing voronoi_diagrams.gpkg
@@ -609,28 +609,28 @@ def update_district_predictions(
         # Read the entire voronoi file and filter by district
         logger.debug("Reading voronoi diagrams for district %d...", district_id)
         voronoi_gdf = gpd.read_file(voronoi_input_file)
-        
+
         # Filter to this district using 'district_i' field
         if 'district_i' not in voronoi_gdf.columns:
             logger.error("'district_i' field not found in voronoi file. Available fields: %s", 
                         list(voronoi_gdf.columns))
             return
-        
+
         voronoi_gdf = voronoi_gdf[voronoi_gdf['district_i'] == district_id].copy()
-        
+
         if len(voronoi_gdf) == 0:
             logger.warning("No voronoi elements found for district %d", district_id)
             return
-        
+
         logger.debug("Found %d voronoi elements for district %d", len(voronoi_gdf), district_id)
-        
+
         # The building ID field in voronoi data is 'building_i'
         voronoi_id_field = 'building_i'
-        
+
         if voronoi_id_field not in voronoi_gdf.columns:
             logger.error("'building_i' field not found in voronoi file for district %d", district_id)
             return
-        
+
         # Use provided ID field or default to 'id'
         if buildings_id_field is None:
             if 'id' in district_buildings.columns:
@@ -638,7 +638,7 @@ def update_district_predictions(
             else:
                 logger.warning("'id' field not found in district_buildings for district %d", district_id)
                 return
-        
+
         logger.debug("Using ID field '%s' for voronoi mapping", buildings_id_field)
         label_field = 'gat_label'
 
@@ -708,7 +708,7 @@ def update_gpkg_with_district(
 
         # Use 'id' field as the standard building identifier
         id_field = 'id'
-        
+
         if id_field not in buildings_gdf.columns:
             logger.error("'id' field not found in building shapefile for district %d", district_id)
             return
@@ -739,7 +739,7 @@ def update_gpkg_with_district(
         # Filter buildings to only those in this district
         # Convert building IDs to same type for matching (handle int/float mismatch)
         district_building_ids = list(building_predictions.keys())
-        
+
         # Ensure ID type consistency
         if id_field in buildings_gdf.columns:
             # Convert adjacency matrix IDs to match shapefile ID type
@@ -747,7 +747,7 @@ def update_gpkg_with_district(
                 district_building_ids = [float(bid) for bid in district_building_ids]
             else:
                 district_building_ids = [int(bid) for bid in district_building_ids]
-        
+
         district_buildings = buildings_gdf[buildings_gdf[id_field].isin(district_building_ids)].copy()
 
         if len(district_buildings) == 0:
@@ -760,14 +760,14 @@ def update_gpkg_with_district(
         for col in district_buildings.columns:
             if col.lower() in ['fid'] and col != id_field:
                 columns_to_drop.append(col)
-        
+
         if columns_to_drop:
             logger.debug(f"Dropping conflicting columns: {columns_to_drop}")
             district_buildings = district_buildings.drop(columns=columns_to_drop)
 
         # Add prediction columns
         district_buildings['district_id'] = district_id
-        
+
         # Create ID mapping with type conversion
         id_to_gat_label = {}
         id_to_cluster = {}
@@ -776,7 +776,7 @@ def update_gpkg_with_district(
             key = float(bid) if buildings_gdf[id_field].dtype in ['float64', 'float32'] else int(bid)
             id_to_gat_label[key] = pred.get('gat_label')
             id_to_cluster[key] = pred.get('spectral_cluster')
-        
+
         district_buildings['gat_label'] = district_buildings[id_field].map(id_to_gat_label)
         district_buildings['spectral_cluster'] = district_buildings[id_field].map(id_to_cluster)
 
@@ -952,13 +952,13 @@ def main(args=None):
     # Log final GeoPackage info (district-specific files)
     building_gpkg_files = list(output_dir.glob('district_*_building_predictions.gpkg'))
     voronoi_gpkg_files = list(output_dir.glob('district_*_voronoi_predictions.gpkg'))
-    
+
     logger.info("=" * 80)
     logger.info("GeoPackage Summary:")
     logger.info("  - Building prediction files: %d", len(building_gpkg_files))
     logger.info("  - Voronoi prediction files: %d", len(voronoi_gpkg_files))
     logger.info("  - Output directory: %s", output_dir)
-    
+
     if len(building_gpkg_files) > 0:
         # Count total buildings across all files
         total_buildings = 0

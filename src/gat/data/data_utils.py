@@ -58,7 +58,7 @@ def load_district_graph(
     # Create mapping from building ID to row index
     # Use 'id' field as the standard building identifier
     id_field = 'id'
-    
+
     if id_field not in buildings_gdf.columns:
         logger.warning("No ID field found in buildings shapefile, using index")
         buildings_gdf['building_id'] = buildings_gdf.index
@@ -73,7 +73,7 @@ def load_district_graph(
     else:
         # Keep as int
         building_ids_in_matrix_typed = building_ids_in_matrix
-    
+
     # Filter to buildings in the matrix
     buildings_gdf = buildings_gdf[buildings_gdf[id_field].isin(building_ids_in_matrix_typed)].copy()
 
@@ -82,7 +82,7 @@ def load_district_graph(
     buildings_gdf = buildings_gdf.sort_values('_sort_key').reset_index(drop=True)
 
     logger.debug(f"Filtered buildings: {len(buildings_gdf)} buildings")
-    
+
     # Check if there's a mismatch between buildings and matrix
     if len(buildings_gdf) != len(sim_matrix):
         logger.warning(
@@ -95,19 +95,19 @@ def load_district_graph(
             buildings_in_shapefile = [int(bid) for bid in buildings_gdf[id_field].tolist()]
         else:
             buildings_in_shapefile = buildings_gdf[id_field].tolist()
-        
+
         mask = sim_matrix.index.isin(buildings_in_shapefile)
         sim_matrix = sim_matrix.loc[mask, mask]
         building_ids_in_matrix = sim_matrix.index.tolist()
-        
+
         # Update typed list after filtering
         if buildings_gdf[id_field].dtype in ['float64', 'float32']:
             building_ids_in_matrix_typed = [float(bid) for bid in building_ids_in_matrix]
         else:
             building_ids_in_matrix_typed = building_ids_in_matrix
-        
+
         logger.debug(f"Filtered adjacency matrix to {len(sim_matrix)} buildings")
-        
+
         # Re-sort buildings to match filtered matrix
         buildings_gdf['_sort_key'] = buildings_gdf[id_field].map({bid: i for i, bid in enumerate(building_ids_in_matrix_typed)})
         buildings_gdf = buildings_gdf.sort_values('_sort_key').reset_index(drop=True)

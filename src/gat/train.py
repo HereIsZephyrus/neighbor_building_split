@@ -14,6 +14,7 @@ import yaml
 from .training import GATConfig
 from .data import BuildingGraphDataset, BuildingDataset, DistrictDataset
 from .utils import setup_logger
+from .utils.feature_extractor import fit_global_clustering_scaler
 from .train_cv import train_cross_validation_mpi, train_cross_validation_sequential
 from .train_final import train_final_model
 
@@ -49,6 +50,12 @@ def parse_args():
         type=str,
         required=True,
         help='Path to district shapefile'
+    )
+    parser.add_argument(
+        '--total-buildings',
+        type=str,
+        default=None,
+        help='Path to total building shapefile for fitting clustering scaler (optional, if not provided uses sample-buildings)'
     )
     parser.add_argument(
         '--output-root-dir',
@@ -218,8 +225,49 @@ def main(args=None):
         logger.error("Failed to load dataset: %s", exc, exc_info=True)
         sys.exit(1)
 
+    # Fit global clustering scaler for consistent feature normalization
+    logger.info("=" * 80)
+    logger.info("Fitting Global Clustering Scaler")
+    logger.info("=" * 80)
+    
+    clustering_scaler = None
+    try:
+        # Use total_buildings if provided, otherwise use sample_buildings
+        buildings_path_for_scaler = getattr(args, 'total_buildings', None) or config.building_path
+        
+        if buildings_path_for_scaler and Path(buildings_path_for_scaler).exists():
+            logger.info("Fitting clustering scaler from: %s", buildings_path_for_scaler)
+            
+            # Get district IDs from dataset
+            district_ids = [data.district_id for data in dataset if hasattr(data, 'district_id')]
+            if not district_ids:
+                district_ids = None
+                logger.warning("No district IDs found in dataset, fitting scaler on all buildings")
+            
+            clustering_scaler = fit_global_clustering_scaler(
+                buildings_path=Path(buildings_path_for_scaler),
+                adjacency_dir=Path(config.adjacency_dir),
+                district_ids=district_ids,
+                sample_size=None  # Use all buildings
+            )
+            
+            # Store in config for later use
+            config.clustering_scaler = clustering_scaler
+            logger.info("✓ Global clustering scaler fitted successfully")
+        else:
+            logger.warning("Building path not found: %s - clustering scaler will be fitted during inference", 
+                         buildings_path_for_scaler)
+            config.clustering_scaler = None
+            
+    except Exception as exc:
+        logger.error("Failed to fit clustering scaler: %s", exc, exc_info=True)
+        logger.warning("Continuing without pre-fitted clustering scaler")
+        config.clustering_scaler = None
+
     # Dispatch to appropriate training mode
+    logger.info("=" * 80)
     logger.info("Training mode: %s", args.mode)
+    logger.info("=" * 80)
 
     if args.mode == 'cv':
         # Cross-validation mode for hyperparameter tuning

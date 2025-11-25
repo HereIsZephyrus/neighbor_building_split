@@ -654,6 +654,9 @@ class Trainer:
                 is_best = True
 
             # Save checkpoints based on config settings
+            # Get clustering_scaler from config if available
+            clustering_scaler = getattr(self.config, 'clustering_scaler', None)
+            
             if self.config.enable_checkpoint_saving:
                 # Normal mode: save periodic and best checkpoints
                 if epoch % self.config.checkpoint_interval == 0 or is_best:
@@ -666,11 +669,13 @@ class Trainer:
                         val_metrics if val_metrics else train_metrics,
                         self.config,
                         checkpoint_path,
-                        is_best=is_best
+                        is_best=is_best,
+                        clustering_scaler=clustering_scaler
                     )
             else:
                 # HPC tuning mode: only save best checkpoint
-                if is_best:
+                # FIXED: In final training mode (no validation), save periodically or always update best.pt
+                if is_best or (not val_metrics and epoch % self.config.checkpoint_interval == 0):
                     checkpoint_path = Path(self.config.checkpoint_dir) / 'best.pt'
                     save_checkpoint(
                         self.model,
@@ -680,8 +685,11 @@ class Trainer:
                         val_metrics if val_metrics else train_metrics,
                         self.config,
                         checkpoint_path,
-                        is_best=True
+                        is_best=True,
+                        clustering_scaler=clustering_scaler
                     )
+                    if not val_metrics:
+                        logger.debug("Saved checkpoint at epoch %d (final training mode, no validation)", epoch)
 
             # Early stopping based on monitoring metric
             should_stop = False
@@ -694,20 +702,45 @@ class Trainer:
                 logger.info(f"Early stopping at epoch {epoch} (monitoring {self.early_stopping_metric})")
                 break
 
-        # Save final checkpoint (only if checkpoint saving is enabled)
-        if self.config.enable_checkpoint_saving:
-            final_model_dir = Path(self.config.output_root_dir) / 'models'
-            final_model_dir.mkdir(parents=True, exist_ok=True)
-            final_checkpoint_path = final_model_dir / f'{self.config.model_identifier}_final_model.pth'
-            save_checkpoint(
-                self.model,
-                self.optimizer,
-                self.scheduler,
-                epoch,
-                val_metrics if val_metrics else train_metrics,
-                self.config,
-                final_checkpoint_path
-            )
+        # Save final checkpoint
+        # FIXED: Always save final model, regardless of enable_checkpoint_saving setting
+        final_model_dir = Path(self.config.output_root_dir) / 'models'
+        final_model_dir.mkdir(parents=True, exist_ok=True)
+        final_checkpoint_path = final_model_dir / f'{self.config.model_identifier}_final_model.pth'
+        
+        # Get clustering_scaler from config if available
+        clustering_scaler = getattr(self.config, 'clustering_scaler', None)
+        
+        save_checkpoint(
+            self.model,
+            self.optimizer,
+            self.scheduler,
+            epoch,
+            val_metrics if val_metrics else train_metrics,
+            self.config,
+            final_checkpoint_path,
+            clustering_scaler=clustering_scaler
+        )
+        logger.info("Final model saved to: %s", final_checkpoint_path)
+        
+        # In HPC mode (no checkpoint saving), ensure best.pt exists
+        if not self.config.enable_checkpoint_saving:
+            best_pt_path = Path(self.config.checkpoint_dir) / 'best.pt'
+            if not best_pt_path.exists():
+                # If no best.pt was saved during training (e.g., final mode with no validation),
+                # save the final model as best.pt
+                logger.info("No best.pt found in HPC mode, saving final model as best.pt")
+                save_checkpoint(
+                    self.model,
+                    self.optimizer,
+                    self.scheduler,
+                    epoch,
+                    val_metrics if val_metrics else train_metrics,
+                    self.config,
+                    best_pt_path,
+                    is_best=True,
+                    clustering_scaler=clustering_scaler
+                )
 
         # Save training history
         history_path = Path(self.config.checkpoint_dir) / f'{self.config.model_identifier}_training_history.json'

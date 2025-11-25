@@ -69,6 +69,12 @@ def parse_args():
         help='Path to district shapefile [train mode]'
     )
     parser.add_argument(
+        '--total-buildings',
+        type=str,
+        default=None,
+        help='Path to total building shapefile for fitting clustering scaler (optional, if not provided uses sample-buildings) [train mode]'
+    )
+    parser.add_argument(
         '--config',
         type=str,
         default=None,
@@ -111,6 +117,12 @@ def parse_args():
         action='store_true',
         help='Use batch inference for large graphs (currently full-graph only) [inference mode]'
     )
+    parser.add_argument(
+        '--clustering-scaler-path',
+        type=str,
+        default=None,
+        help='Path to pre-fitted clustering scaler pickle file (optional, overrides checkpoint scaler) [inference mode]'
+    )
 
     return parser.parse_args()
 
@@ -149,6 +161,7 @@ def main():
             adjacency_dir=args.adjacency_dir,
             sample_buildings=args.sample_buildings,
             sample_districts=args.sample_districts,
+            total_buildings=args.total_buildings,
             output_root_dir=args.output_root_dir,
             model_identifier=args.model_identifier,
             config=args.config,
@@ -175,7 +188,8 @@ def main():
             district_ids=args.district_ids,
             device=args.device if args.device else ('cuda' if torch.cuda.is_available() else 'cpu'),
             batch_inference=args.batch_inference,
-            resume=args.resume
+            resume=args.resume,
+            clustering_scaler_path=args.clustering_scaler_path
         )
         inference_main(inference_args)
 

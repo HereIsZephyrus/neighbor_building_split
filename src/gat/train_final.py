@@ -74,7 +74,8 @@ def train_final_model(config, dataset, args):
                 # Load the best model checkpoint
                 best_checkpoint_path = Path(config.checkpoint_dir) / "best.pt"
                 if best_checkpoint_path.exists():
-                    checkpoint = torch.load(best_checkpoint_path, map_location=device)
+                    # PyTorch 2.6+: Use weights_only=False to load sklearn objects (clustering_scaler)
+                    checkpoint = torch.load(best_checkpoint_path, map_location=device, weights_only=False)
                     model.load_state_dict(checkpoint['model_state_dict'])
                     logger.info("Loaded best model from %s", best_checkpoint_path)
                 else:
@@ -132,6 +133,13 @@ def train_final_model(config, dataset, args):
                     # Process all districts
                     saved_count = 0
                     failed_count = 0
+                    
+                    # Use global clustering_scaler from config if available
+                    clustering_scaler_vis = getattr(config, 'clustering_scaler', None)
+                    if clustering_scaler_vis is not None:
+                        logger.info("Using pre-fitted global clustering scaler from config")
+                    else:
+                        logger.warning("No global clustering scaler found, will fit on first district (not recommended)")
 
                     with torch.no_grad():
                         for idx, data in enumerate(data_list):
@@ -203,10 +211,38 @@ def train_final_model(config, dataset, args):
                                         if adjacency_path.exists():
                                             adjacency_matrix = pd.read_pickle(adjacency_path)
                                             building_ids = adjacency_matrix.index.tolist()
+                                            
+                                            # CRITICAL FIX: Sort district_buildings to match adjacency matrix order
+                                            # This ensures consistency between GAT predictions and clustering features
+                                            id_field = 'id'
+                                            if id_field in district_buildings.columns:
+                                                # Handle type mismatch between adjacency matrix index and shapefile ID field
+                                                if district_buildings[id_field].dtype in ['float64', 'float32']:
+                                                    building_ids_typed = [float(bid) for bid in building_ids]
+                                                else:
+                                                    building_ids_typed = building_ids
+                                                
+                                                # Filter and sort buildings to match adjacency matrix order
+                                                district_buildings = district_buildings[district_buildings[id_field].isin(building_ids_typed)].copy()
+                                                district_buildings['_sort_key'] = district_buildings[id_field].map(
+                                                    {bid: i for i, bid in enumerate(building_ids_typed)}
+                                                )
+                                                district_buildings = district_buildings.sort_values('_sort_key').reset_index(drop=True)
+                                                district_buildings = district_buildings.drop(columns=['_sort_key'])
+                                                logger.debug(f"Sorted {len(district_buildings)} buildings to match adjacency matrix order for district {district_id}")
 
-                                            clustering_features, _ = extract_clustering_features(
-                                                district_buildings, scaler=None, fit_scaler=True
-                                            )
+                                            # FIXED: Use consistent clustering feature standardization across districts
+                                            if clustering_scaler_vis is None:
+                                                # First district: fit new scaler
+                                                clustering_features, clustering_scaler_vis = extract_clustering_features(
+                                                    district_buildings, scaler=None, fit_scaler=True
+                                                )
+                                                logger.debug(f"Fitted clustering scaler on district {district_id} for visualization")
+                                            else:
+                                                # Subsequent districts: reuse fitted scaler
+                                                clustering_features, _ = extract_clustering_features(
+                                                    district_buildings, scaler=clustering_scaler_vis, fit_scaler=False
+                                                )
 
                                             # Get spectral clustering config from config object
                                             spectral_config = {
@@ -255,6 +291,12 @@ def train_final_model(config, dataset, args):
                                                     comp_building_ids = [building_ids[i] for i in range(len(comp_mask)) if comp_mask[i]]
                                                     comp_clustering_features = clustering_features[comp_mask]
                                                     comp_adjacency = extract_subgraph_from_adjacency(adjacency_matrix, comp_building_ids)
+                                                    
+                                                    # Extract voronoi areas for this component if available
+                                                    comp_voronoi_areas = None
+                                                    if 'voroniarea' in district_buildings.columns:
+                                                        comp_voronoi_dict = dict(zip(building_ids, district_buildings['voroniarea'].values))
+                                                        comp_voronoi_areas = {bid: comp_voronoi_dict[bid] for bid in comp_building_ids if bid in comp_voronoi_dict}
 
                                                     comp_clusters, comp_final_labels, _, _, _ = perform_spectral_clustering_pipeline(
                                                         embeddings=comp_embeddings_np,
@@ -263,7 +305,7 @@ def train_final_model(config, dataset, args):
                                                         gat_labels=comp_gat_labels,
                                                         gat_logits=comp_logits_np,
                                                         building_ids=comp_building_ids,
-                                                        voronoi_areas=None,
+                                                        voronoi_areas=comp_voronoi_areas,
                                                         n_clusters=None,
                                                         use_confidence_weighted_voting=spectral_config['use_confidence_weighted_voting'],
                                                         embedding_weight=spectral_config['embedding_weight'],

@@ -83,7 +83,8 @@ def load_checkpoint(
     """
     logger.info(f"Loading checkpoint from {filepath}")
 
-    checkpoint = torch.load(filepath, map_location=device)
+    # PyTorch 2.6+: Use weights_only=False to load sklearn objects (clustering_scaler)
+    checkpoint = torch.load(filepath, map_location=device, weights_only=False)
 
     model.load_state_dict(checkpoint['model_state_dict'])
 

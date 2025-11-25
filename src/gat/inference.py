@@ -83,6 +83,12 @@ def parse_args():
         action='store_true',
         help='Use batch inference for large graphs (currently full-graph only)'
     )
+    parser.add_argument(
+        '--clustering-scaler-path',
+        type=str,
+        default=None,
+        help='Path to pre-fitted clustering scaler pickle file (optional, overrides checkpoint scaler)'
+    )
 
     return parser.parse_args()
 
@@ -116,7 +122,8 @@ def load_model_from_file(checkpoint_path: Path, device: str) -> tuple:
     """
     logger.info("Loading checkpoint from %s", checkpoint_path)
 
-    checkpoint = torch.load(checkpoint_path, map_location=device)
+    # PyTorch 2.6+: Use weights_only=False to load sklearn objects (clustering_scaler)
+    checkpoint = torch.load(checkpoint_path, map_location=device, weights_only=False)
 
     # Extract config
     config_dict = checkpoint.get('config', {})
@@ -158,9 +165,13 @@ def load_model_from_file(checkpoint_path: Path, device: str) -> tuple:
     # Load clustering scaler if available
     clustering_scaler = checkpoint.get('clustering_scaler', None)
     if clustering_scaler is not None:
-        logger.info("Loaded clustering feature scaler from checkpoint")
+        logger.info("✓ Loaded pre-fitted clustering scaler from checkpoint")
+        logger.info("  Feature means: %s", clustering_scaler.mean_[:5] if hasattr(clustering_scaler, 'mean_') else 'N/A')
+        logger.info("  Feature stds: %s", clustering_scaler.scale_[:5] if hasattr(clustering_scaler, 'scale_') else 'N/A')
     else:
-        logger.warning("No clustering scaler found in checkpoint - will fit new scaler during inference")
+        logger.warning("⚠ No clustering scaler found in checkpoint")
+        logger.warning("  This may cause inconsistency if trained with a global scaler")
+        logger.warning("  Will fit new scaler on first inference district (not recommended)")
 
     logger.info("Model loaded from epoch %s", checkpoint.get('epoch', 'unknown'))
     logger.info("Model configuration: in_features=%d, hidden_dim=%d, num_classes=%d, num_layers=%d, num_heads=%d",
@@ -228,7 +239,29 @@ def generate_embeddings_for_district(
 
         # Filter and sort buildings to match adjacency matrix
         id_field = 'id'
-
+        
+        # ========== CRITICAL: Check for off-by-one error (same as in data_utils.py) ==========
+        if 'OBJECTID' in buildings_gdf.columns and id_field == 'id':
+            # Check if adjacency matrix uses OBJECTID while buildings have 'id'
+            sample_matrix_ids = building_ids_in_matrix[:min(100, len(building_ids_in_matrix))]
+            
+            matched_with_id = buildings_gdf[buildings_gdf['id'].isin(sample_matrix_ids)].shape[0]
+            matched_with_objectid = buildings_gdf[buildings_gdf['OBJECTID'].isin(sample_matrix_ids)].shape[0]
+            
+            if matched_with_objectid > matched_with_id:
+                # Adjacency uses OBJECTID, convert to 'id' (subtract 1)
+                logger.warning(
+                    f"District {district_id}: OFF-BY-ONE DETECTED in inference. "
+                    "Converting adjacency matrix indices (OBJECTID -> id)"
+                )
+                
+                new_index = [idx - 1 for idx in adjacency_matrix.index]
+                new_columns = [col - 1 for col in adjacency_matrix.columns]
+                adjacency_matrix.index = new_index
+                adjacency_matrix.columns = new_columns
+                building_ids_in_matrix = new_index
+                
+                logger.info(f"District {district_id}: Converted adjacency matrix indices")
 
         # Handle type mismatch between adjacency matrix index and shapefile ID field
         if buildings_gdf[id_field].dtype in ['float64', 'float32']:
@@ -641,6 +674,31 @@ def update_district_predictions(
 
         logger.debug("Using ID field '%s' for voronoi mapping", buildings_id_field)
         label_field = 'gat_label'
+        
+        # ========== CRITICAL: Handle off-by-one between voronoi building_i and building 'id' ==========
+        # Voronoi building_i uses OBJECTID (from rasterizer)
+        # But district_buildings 'id' field = OBJECTID - 1
+        # We need to check if voronoi uses OBJECTID and adjust the mapping
+        
+        needs_voronoi_conversion = False
+        
+        if 'OBJECTID' in district_buildings.columns and buildings_id_field == 'id':
+            # Check if voronoi building_i matches OBJECTID or 'id'
+            sample_voronoi_ids = voronoi_gdf[voronoi_id_field].head(min(50, len(voronoi_gdf))).values
+            
+            matched_with_id = district_buildings[district_buildings['id'].isin(sample_voronoi_ids)].shape[0]
+            matched_with_objectid = district_buildings[district_buildings['OBJECTID'].isin(sample_voronoi_ids)].shape[0]
+            
+            if matched_with_objectid > matched_with_id:
+                logger.warning(
+                    f"District {district_id}: OFF-BY-ONE in voronoi! "
+                    f"Voronoi building_i uses OBJECTID, but predictions use 'id'. "
+                    f"Will use OBJECTID for mapping."
+                )
+                needs_voronoi_conversion = True
+                # Use OBJECTID field instead of 'id' for mapping
+                buildings_id_field = 'OBJECTID'
+                logger.info(f"District {district_id}: Using OBJECTID field for voronoi mapping")
 
         # Create ID to label mapping with type conversion
         # Voronoi building_i might be different type than buildings ID
@@ -721,6 +779,23 @@ def update_gpkg_with_district(
 
         adjacency_matrix = pd.read_pickle(adjacency_path)
         building_ids = adjacency_matrix.index.tolist()
+        
+        # ========== CRITICAL: Check for off-by-one error ==========
+        if 'OBJECTID' in buildings_gdf.columns and id_field == 'id':
+            # Check if adjacency matrix uses OBJECTID while buildings have 'id'
+            sample_matrix_ids = building_ids[:min(100, len(building_ids))]
+            
+            matched_with_id = buildings_gdf[buildings_gdf['id'].isin(sample_matrix_ids)].shape[0]
+            matched_with_objectid = buildings_gdf[buildings_gdf['OBJECTID'].isin(sample_matrix_ids)].shape[0]
+            
+            if matched_with_objectid > matched_with_id:
+                # Adjacency uses OBJECTID, convert to 'id' (subtract 1)
+                logger.warning(
+                    f"District {district_id}: OFF-BY-ONE DETECTED in update_gpkg. "
+                    "Converting adjacency IDs (OBJECTID -> id)"
+                )
+                building_ids = [idx - 1 for idx in building_ids]
+                logger.info(f"District {district_id}: Converted building IDs for gpkg update")
 
         # Get predictions for this district
         gat_labels = predictions['gat_labels']
@@ -847,6 +922,17 @@ def main(args=None):
 
     # Load model
     model, _, clustering_scaler = load_model_from_file(model_path, args.device)
+    
+    # Override clustering_scaler if provided externally
+    if args.clustering_scaler_path:
+        try:
+            import pickle
+            with open(args.clustering_scaler_path, 'rb') as f:
+                clustering_scaler = pickle.load(f)
+            logger.info("✓ Loaded external clustering scaler from: %s", args.clustering_scaler_path)
+        except Exception as exc:
+            logger.error("Failed to load external clustering scaler: %s", exc)
+            logger.info("Using scaler from checkpoint (if available)")
 
     # Get district IDs
     if args.district_ids:

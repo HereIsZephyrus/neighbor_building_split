@@ -63,6 +63,44 @@ def load_district_graph(
         logger.warning("No ID field found in buildings shapefile, using index")
         buildings_gdf['building_id'] = buildings_gdf.index
         id_field = 'building_id'
+    
+    # ========== CRITICAL: Check for off-by-one error between adjacency and building IDs ==========
+    # Voronoi generation may use OBJECTID (from rasterizer), but GAT expects 'id' field
+    # where id = OBJECTID - 1. We need to detect and fix this misalignment.
+    
+    needs_id_conversion = False
+    
+    if 'OBJECTID' in buildings_gdf.columns and id_field == 'id':
+        # Check if adjacency matrix uses OBJECTID while buildings have 'id'
+        # Sample a few IDs to test
+        sample_matrix_ids = building_ids_in_matrix[:min(100, len(building_ids_in_matrix))]
+        
+        matched_with_id = buildings_gdf[buildings_gdf['id'].isin(sample_matrix_ids)].shape[0]
+        matched_with_objectid = buildings_gdf[buildings_gdf['OBJECTID'].isin(sample_matrix_ids)].shape[0]
+        
+        if matched_with_objectid > matched_with_id:
+            # Adjacency uses OBJECTID, but we need to use 'id'
+            logger.warning(
+                "OFF-BY-ONE DETECTED: Adjacency matrix uses OBJECTID, but GAT expects 'id' field. "
+                "Converting adjacency matrix indices (OBJECTID -> id = OBJECTID - 1)"
+            )
+            needs_id_conversion = True
+            
+            # Convert adjacency matrix index/columns: OBJECTID -> id (subtract 1)
+            # This aligns the adjacency matrix with the 'id' field
+            new_index = [idx - 1 for idx in sim_matrix.index]
+            new_columns = [col - 1 for col in sim_matrix.columns]
+            sim_matrix.index = new_index
+            sim_matrix.columns = new_columns
+            building_ids_in_matrix = new_index
+            
+            logger.info("Converted adjacency matrix: OBJECTID -> id (subtracted 1)")
+        elif matched_with_id < len(sample_matrix_ids) * 0.5 and matched_with_objectid < len(sample_matrix_ids) * 0.5:
+            logger.error(
+                "Cannot match adjacency matrix IDs with either 'id' or 'OBJECTID' fields! "
+                f"Matched with id: {matched_with_id}/{len(sample_matrix_ids)}, "
+                f"Matched with OBJECTID: {matched_with_objectid}/{len(sample_matrix_ids)}"
+            )
 
     # Handle type mismatch between adjacency matrix index and shapefile ID field
     # Adjacency matrix typically has int64 index, but shapefile might have float64

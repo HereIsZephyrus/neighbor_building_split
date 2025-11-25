@@ -198,3 +198,96 @@ def extract_clustering_features(
         logger.warning("No standardization applied to clustering features (scaler=None, fit_scaler=False)")
 
     return features, scaler
+
+
+def fit_global_clustering_scaler(
+    buildings_path: Path,
+    adjacency_dir: Optional[Path] = None,
+    district_ids: Optional[list] = None,
+    sample_size: Optional[int] = None
+) -> StandardScaler:
+    """
+    Fit a global StandardScaler for clustering features from all buildings.
+    
+    This function ensures consistent feature normalization across all districts
+    by fitting the scaler on the entire building dataset (or a representative sample).
+    
+    Design Rationale:
+    - Training and inference use the same scaler for consistency
+    - Prevents order-dependency (first district determining normalization)
+    - Provides representative statistics from the full population
+    - Matches the approach used for GAT features in BuildingGraphDataset
+    
+    Args:
+        buildings_path: Path to building shapefile containing all buildings
+        adjacency_dir: Optional directory containing adjacency matrices (for filtering)
+        district_ids: Optional list of district IDs to include (for filtering)
+        sample_size: Optional number of buildings to sample (for large datasets)
+    
+    Returns:
+        Fitted StandardScaler for clustering features
+        
+    Raises:
+        ValueError: If required columns are missing
+        FileNotFoundError: If buildings file doesn't exist
+    """
+    import pandas as pd
+    
+    logger.info("Fitting global clustering scaler from %s", buildings_path)
+    
+    # Load all buildings
+    if not Path(buildings_path).exists():
+        raise FileNotFoundError(f"Building shapefile not found: {buildings_path}")
+    
+    buildings_gdf = gpd.read_file(buildings_path)
+    logger.info("Loaded %d buildings from %s", len(buildings_gdf), buildings_path)
+    
+    # Filter by district IDs if provided
+    if district_ids is not None and adjacency_dir is not None:
+        logger.info("Filtering buildings by %d districts...", len(district_ids))
+        all_building_ids = set()
+        
+        for district_id in district_ids:
+            adjacency_path = Path(adjacency_dir) / f"district_{district_id}_adjacency.pkl"
+            if adjacency_path.exists():
+                try:
+                    adjacency_matrix = pd.read_pickle(adjacency_path)
+                    building_ids = adjacency_matrix.index.tolist()
+                    all_building_ids.update(building_ids)
+                except Exception as e:
+                    logger.warning("Failed to load adjacency for district %d: %s", district_id, e)
+                    continue
+        
+        # Filter buildings
+        id_field = 'id'
+        if id_field in buildings_gdf.columns:
+            # Handle type conversion
+            if buildings_gdf[id_field].dtype in ['float64', 'float32']:
+                all_building_ids_typed = [float(bid) for bid in all_building_ids]
+            else:
+                all_building_ids_typed = list(all_building_ids)
+            
+            buildings_gdf = buildings_gdf[buildings_gdf[id_field].isin(all_building_ids_typed)].copy()
+            logger.info("Filtered to %d buildings in training districts", len(buildings_gdf))
+    
+    # Sample if requested (for very large datasets)
+    if sample_size is not None and len(buildings_gdf) > sample_size:
+        logger.info("Sampling %d buildings from %d total", sample_size, len(buildings_gdf))
+        buildings_gdf = buildings_gdf.sample(n=sample_size, random_state=42)
+    
+    # Extract clustering features WITHOUT fitting scaler yet
+    features, _ = extract_clustering_features(
+        buildings_gdf,
+        scaler=None,
+        fit_scaler=False
+    )
+    
+    # Now fit the scaler on all features
+    scaler = StandardScaler()
+    scaler.fit(features)
+    
+    logger.info("Fitted global clustering scaler on %d buildings", len(buildings_gdf))
+    logger.info("Feature means: %s", scaler.mean_)
+    logger.info("Feature stds: %s", scaler.scale_)
+    
+    return scaler

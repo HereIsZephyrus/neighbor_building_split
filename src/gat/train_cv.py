@@ -203,7 +203,8 @@ def train_cross_validation_mpi(config, dataset, args):
 
                 best_checkpoint_path = Path(fold_config.checkpoint_dir) / "best.pt"
                 if best_checkpoint_path.exists():
-                    checkpoint = torch.load(best_checkpoint_path, map_location=device)
+                    # PyTorch 2.6+: Use weights_only=False to load sklearn objects (clustering_scaler)
+                    checkpoint = torch.load(best_checkpoint_path, map_location=device, weights_only=False)
                     model.load_state_dict(checkpoint['model_state_dict'])
                     logger.info("Rank %d: Loaded best model from %s", rank, best_checkpoint_path)
                 else:

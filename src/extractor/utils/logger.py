@@ -7,61 +7,105 @@ from typing import Optional
 
 
 def setup_logger(
-    name: str = "building_segmentation",
-    level: int = logging.INFO,
     log_file: Optional[Path] = None,
+    level: int = logging.INFO,
 ) -> logging.Logger:
     """
-    Set up and configure logger with console and optional file output.
-
+    Initialize root logger with console and optional file handlers.
+    
+    This function should be called ONCE at the start of the application.
+    All child loggers created via get_logger() will inherit the root logger's
+    level and handlers through propagation.
+    
     Args:
-        name: Logger name
+        log_file: Optional path to log file. If None, only console logging.
         level: Logging level (default: INFO)
-        log_file: Optional path to log file
-
+    
     Returns:
-        Configured logger instance
+        Root logger instance
+    
+    Example:
+        # At application start
+        setup_logger(log_file=Path("app.log"), level=logging.DEBUG)
+        
+        # In any module
+        logger = get_logger(__name__)  # Inherits DEBUG level automatically
     """
-    logger = logging.getLogger(name)
-    logger.setLevel(level)
-
-    # Remove existing handlers
-    logger.handlers.clear()
-
+    # Always configure root logger (name="")
+    root_logger = logging.getLogger()
+    
+    # Preserve more verbose level if root logger already configured
+    # Lower numeric value = more verbose (DEBUG=10 < INFO=20)
+    if root_logger.level != logging.NOTSET and root_logger.level < level:
+        # Root logger already has more verbose level, keep it
+        level = root_logger.level
+    else:
+        # Set root logger level
+        root_logger.setLevel(level)
+    
+    # Clear existing handlers to avoid duplicates
+    root_logger.handlers.clear()
+    
     # Create formatter
     formatter = logging.Formatter(
         fmt="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
         datefmt="%Y-%m-%d %H:%M:%S",
     )
-    # Console handler - only output up to warning level
+    
+    # Console handler
     console_handler = logging.StreamHandler(sys.stdout)
-    console_handler.setLevel(logging.WARNING)
+    console_handler.setLevel(logging.WARNING)  # Hardcoded: only WARNING and above to console
     console_handler.setFormatter(formatter)
-    logger.addHandler(console_handler)
-
+    root_logger.addHandler(console_handler)
+    
     # File handler (optional)
     if log_file:
         log_file.parent.mkdir(parents=True, exist_ok=True)
         file_handler = logging.FileHandler(log_file)
         file_handler.setLevel(level)
         file_handler.setFormatter(formatter)
-        logger.addHandler(file_handler)
+        root_logger.addHandler(file_handler)
+    
+    return root_logger
 
-    return logger
 
-
-def get_logger(name: str = "building_segmentation") -> logging.Logger:
+def get_logger(name: str) -> logging.Logger:
     """
-    Get existing logger or create new one.
-
+    Get logger instance for a module, inheriting root logger's configuration.
+    
+    This function should be used in all modules to get a logger. The logger
+    will automatically inherit the root logger's level and handlers through
+    propagation. No handlers are added to child loggers.
+    
     Args:
-        name: Logger name
-
+        name: Logger name (usually __name__ from calling module)
+    
     Returns:
-        Logger instance
+        Logger instance that propagates to root logger
+    
+    Example:
+        # In any module
+        from .utils.logger import get_logger
+        logger = get_logger(__name__)
+        logger.debug("Debug message")  # Will use root logger's level
     """
     logger = logging.getLogger(name)
-    if not logger.handlers:
-        return setup_logger(name)
+    
+    # Get root logger to check configuration
+    root_logger = logging.getLogger()
+    
+    # Set logger level based on root logger configuration
+    if root_logger.level == logging.NOTSET:
+        # Root logger not configured, use default INFO
+        logger.setLevel(logging.INFO)
+    else:
+        # Root logger is configured, inherit its level
+        logger.setLevel(root_logger.level)
+    
+    # Ensure propagation is enabled (messages bubble up to root logger handlers)
+    logger.propagate = True
+    
+    # Do NOT add handlers to child loggers - use root logger's handlers via propagation
+    # This ensures all loggers share the same handlers and level
+    
     return logger
-

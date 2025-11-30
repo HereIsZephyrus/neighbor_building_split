@@ -5,26 +5,26 @@ import geopandas as gpd
 from tqdm import tqdm
 
 def parse_arguments():
-    parser = argparse.ArgumentParser(description="Merge shapefiles")
+    parser = argparse.ArgumentParser(description="Merge shapefiles and GeoPackage files")
     parser.add_argument("--input-directory", type=str, required=True)
     parser.add_argument("--output-file", type=str, required=True)
     return parser.parse_args()
 
 def merge_shapefiles(input_dir, output_path):
     """
-    Merge all shapefiles in the input directory into a single shapefile.
-    :param input_dir: The path to the input directory containing .shp files
-    :param output_path: The path to the output shapefile (including filename)
+    Merge all shapefiles and GeoPackage files in the input directory into a single file.
+    :param input_dir: The path to the input directory containing .shp or .gpkg files
+    :param output_path: The path to the output file (including filename)
     """
-    # Collect all .shp file paths
+    # Collect all .shp and .gpkg file paths
     shp_files = []
     for file in os.listdir(input_dir):
-        if file.endswith(".shp") and not file.startswith("~"):
+        if file.endswith((".shp", ".gpkg")) and not file.startswith("~"):
             shp_path = os.path.join(input_dir, file)
             shp_files.append(shp_path)
 
     if not shp_files:
-        print("ERROR: No shapefiles found in the input directory")
+        print("ERROR: No shapefiles or GeoPackage files found in the input directory")
         return
 
     # Batch read and merge

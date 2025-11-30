@@ -1,77 +1,48 @@
-# GAT Training Configuration
-model: 
-  hidden_dim: 
-  num_layers: 
-  num_heads: 
-  dropout: 
-  negative_slope: 
-  add_self_loops: 
-
-training: 
-  lr: 
-  # L2 regularization coefficient
-  weight_decay: 
-  # maximum number of training epochs
-  epochs: 
-
-  # early stopping patience
-  patience: 
-  min_delta: 
-
-  # Cross-validation configuration
-  k_fold: 
-  cv_mode: # 'standard' or 'overlapping'
-  # val_ratio: 
-  # overlap_ratio: 
-
-  # validation interval (validate every N epochs)
-  val_interval: 
-  batch_size: 
-
-  # number of neighbors to sample (per layer)
-  # [15, 10] means sample 15 neighbors in the first layer and 10 neighbors in the second layer
-  num_neighbors: 
-  # graph size threshold (use NeighborLoader sampling when node count exceeds this value)
-  node_threshold: 
-  num_workers: 
-  use_amp: 
-  gradient_accumulation_steps: 
-
-  # Spatial smoothness regularization
-  # Weight for smoothness loss (encourages neighboring buildings to have same class)
-  lambda_smooth: # Recommended range 0.05-2.0 (start small)
-  smooth_temperature: 
-
-  class_weight_smoothing: 
-
-focal_loss: 
-  enabled: 
-  alpha: 
-  gamma: 
-
-data: 
-  num_classes: 
-  normalize_features: 
-
-logging: 
-  log_interval: 
-  checkpoint_interval: 
-  enable_tensorboard: 
-  enable_final_visualization: 
-  max_visualize_districts: 
-
-# Spectral Clustering Configuration
-spectral_clustering: 
-  min_component_size: 
-  embedding_weight: 
-  feature_weight: 
-  distance_weight: 
-  distance_scale: 
-  oversample_factor: 
-  min_cluster_size: 
-  max_hops: 
-  use_confidence_weighted_voting: # Use GAT confidence scores for weighted voting
-  confidence_threshold_high: # High confidence threshold (trust GAT more)
-  confidence_threshold_low: # Low confidence threshold (rely more on spatial grouping)
-
-seed: 
+data:
+  num_classes:
+similarity_loss:
+  enabled:
+  temperature:
+logging:
+  checkpoint_interval:
+  enable_checkpoint_saving:
+  enable_final_visualization:
+  enable_tensorboard:
+  log_interval:
+  max_visualize_districts:
+model:
+  add_self_loops:
+  dropout:
+  hidden_dim:
+  negative_slope:
+  num_heads:
+  num_layers:
+seed:
+spectral_clustering:
+  distance_scale:
+  distance_weight:
+  embedding_weight:
+  feature_weight:
+  max_hops:
+  min_cluster_size:
+  min_component_size:
+  oversample_factor:
+  use_confidence_weighted_voting:
+training:
+  batch_size:
+  class_weight_smoothing:
+  cv_mode:
+  epochs:
+  gradient_accumulation_steps:
+  k_fold:
+  lambda_smooth:
+  lr:
+  min_delta:
+  node_threshold:
+  num_neighbors:
+  num_workers:
+  patience:
+  smooth_temperature:
+  use_amp:
+  val_interval:
+  weight_decay:

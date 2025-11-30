@@ -278,7 +278,7 @@ def main():
     log_file = config.output_dir / f"voronoi_diagram_{datetime.now().strftime('%Y%m%d_%H')}{log_suffix}.log" if generate_voronoi_diagram else config.output_dir / f"raster_generation_{datetime.now().strftime('%Y%m%d_%H')}{log_suffix}.log"
     mode_name = "Voronoi Diagram Generation" if generate_voronoi_diagram else "Raster Generation"
 
-    logger = setup_logger(log_file=log_file, level = logging.INFO)
+    logger = setup_logger(log_file=log_file, level = logging.DEBUG)
 
     if rank == 0:
         logger.info("=" * 80)

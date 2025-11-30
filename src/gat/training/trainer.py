@@ -8,7 +8,6 @@ from pathlib import Path
 from datetime import datetime
 import numpy as np
 import torch
-import torch.nn as nn
 from torch.optim import Adam
 from torch.optim.lr_scheduler import ReduceLROnPlateau
 from torch_geometric.data import Data
@@ -21,7 +20,7 @@ from ..utils import get_logger
 from ..utils.metrics import compute_f1_scores
 from .config import GATConfig
 from .smooth_loss import edge_smoothness_loss
-from .focal_loss import create_loss_function
+from .similarity_loss import create_balanced_loss_function
 from .train_utils import (
     save_checkpoint,
     load_checkpoint,
@@ -134,12 +133,27 @@ class Trainer:
             weight_decay=config.weight_decay
         )
 
-        self.scheduler = ReduceLROnPlateau(
-            self.optimizer,
-            mode='max',
-            factor=0.5,
-            patience=config.patience // 2
-        )
+        # Setup learning rate scheduler based on whether we have validation data
+        if val_data_list is not None and len(val_data_list) > 0:
+            # With validation: use validation accuracy for scheduling
+            self.scheduler = ReduceLROnPlateau(
+                self.optimizer,
+                mode='max',  # Maximize validation accuracy
+                factor=0.7,
+                patience=config.patience // 2
+            )
+            self.scheduler_metric = 'val_acc'
+            logger.info("Learning rate scheduler: ReduceLROnPlateau based on validation accuracy")
+        else:
+            # Without validation (final training): use training loss for scheduling
+            self.scheduler = ReduceLROnPlateau(
+                self.optimizer,
+                mode='min',  # Minimize training loss
+                factor=0.5,
+                patience=config.patience // 3  # More aggressive for training loss
+            )
+            self.scheduler_metric = 'train_loss'
+            logger.info("Learning rate scheduler: ReduceLROnPlateau based on training loss (no validation set)")
 
         # Compute class weights to handle class imbalance
         logger.info("Computing class weights from training data...")
@@ -153,42 +167,71 @@ class Trainer:
         )
         class_weights = class_weights.to(self.device)
 
-        # Create loss function (supports Focal Loss and Label Smoothing)
-        use_focal_loss = getattr(config, 'use_focal_loss', False)
-        focal_gamma = getattr(config, 'focal_gamma', 2.0)
-        label_smoothing = getattr(config, 'label_smoothing', 0.0)
+        # Create balanced loss function with similarity, purity reward, and diversity penalty
+        use_similarity_loss = getattr(config, 'use_similarity_loss', True)
+        similarity_temperature = getattr(config, 'similarity_temperature', 0.1)
+        use_purity_reward = getattr(config, 'use_purity_reward', True)
+        lambda_purity = getattr(config, 'lambda_purity', 0.1)
+        use_diversity_penalty = getattr(config, 'use_diversity_penalty', True)
+        lambda_diversity = getattr(config, 'lambda_diversity', 1.0)
+        min_samples_per_class = getattr(config, 'min_samples_per_class', 2)
 
-        self.criterion = create_loss_function(
+        self.criterion = create_balanced_loss_function(
             num_classes=config.num_classes,
             class_weights=class_weights,
-            focal_loss=use_focal_loss,
-            focal_gamma=focal_gamma,
-            label_smoothing=label_smoothing
+            use_similarity_loss=use_similarity_loss,
+            similarity_temperature=similarity_temperature,
+            lambda_purity=lambda_purity if use_purity_reward else 0.0,
+            lambda_diversity=lambda_diversity if use_diversity_penalty else 0.0,
+            min_samples_per_class=min_samples_per_class
         )
 
-        if use_focal_loss:
-            logger.info(f"Using Focal Loss (gamma={focal_gamma}, label_smoothing={label_smoothing}) to handle class imbalance")
-        elif label_smoothing > 0:
-            logger.info(f"Using CrossEntropyLoss with label smoothing={label_smoothing}")
+        # Build readable loss description
+        loss_components = []
+        if use_similarity_loss:
+            loss_components.append(f"Similarity Loss (T={similarity_temperature})")
         else:
-            logger.info("Using weighted CrossEntropyLoss to handle class imbalance")
+            loss_components.append("CrossEntropy")
+
+        if use_purity_reward:
+            loss_components.append(f"Purity Reward (λ={lambda_purity})")
+
+        if use_diversity_penalty:
+            loss_components.append(f"Diversity Penalty (λ={lambda_diversity})")
+
+        logger.info("Loss function: %s with class weights", " + ".join(loss_components))
 
         # Create unweighted loss function for validation
-        self.val_criterion = create_loss_function(
+        self.val_criterion = create_balanced_loss_function(
             num_classes=config.num_classes,
             class_weights=None,  # No class weights for validation
-            focal_loss=use_focal_loss,
-            focal_gamma=focal_gamma,
-            label_smoothing=label_smoothing
+            use_similarity_loss=use_similarity_loss,
+            similarity_temperature=similarity_temperature,
+            lambda_purity=lambda_purity if use_purity_reward else 0.0,
+            lambda_diversity=lambda_diversity if use_diversity_penalty else 0.0,
+            min_samples_per_class=min_samples_per_class
         )
         logger.info("Validation will use unweighted loss for fair comparison across folds")
 
-        # Early stopping
-        self.early_stopping = EarlyStopping(
-            patience=config.patience,
-            min_delta=config.min_delta,
-            mode='max'  # Maximize accuracy
-        )
+        # Early stopping based on whether we have validation data
+        if val_data_list is not None and len(val_data_list) > 0:
+            # With validation: monitor validation accuracy
+            self.early_stopping = EarlyStopping(
+                patience=config.patience,
+                min_delta=config.min_delta,
+                mode='max'  # Maximize accuracy
+            )
+            self.early_stopping_metric = 'val_acc'
+            logger.info("Early stopping: monitoring validation accuracy")
+        else:
+            # Without validation (final training): monitor training loss
+            self.early_stopping = EarlyStopping(
+                patience=config.patience,
+                min_delta=config.min_delta,
+                mode='min'  # Minimize training loss
+            )
+            self.early_stopping_metric = 'train_loss'
+            logger.info("Early stopping: monitoring training loss (no validation set)")
 
         # TensorBoard writer
         self.writer = None
@@ -563,9 +606,11 @@ class Trainer:
             if epoch % self.config.val_interval == 0 or epoch == self.config.epochs:
                 val_metrics = self.validate()
 
-            # Update learning rate
-            if val_metrics:
+            # Update learning rate based on scheduler metric
+            if self.scheduler_metric == 'val_acc' and val_metrics:
                 self.scheduler.step(val_metrics['accuracy'])
+            elif self.scheduler_metric == 'train_loss':
+                self.scheduler.step(train_metrics['loss'])
 
             # Log metrics
             current_lr = get_lr(self.optimizer)
@@ -609,6 +654,9 @@ class Trainer:
                 is_best = True
 
             # Save checkpoints based on config settings
+            # Get clustering_scaler from config if available
+            clustering_scaler = getattr(self.config, 'clustering_scaler', None)
+            
             if self.config.enable_checkpoint_saving:
                 # Normal mode: save periodic and best checkpoints
                 if epoch % self.config.checkpoint_interval == 0 or is_best:
@@ -621,12 +669,14 @@ class Trainer:
                         val_metrics if val_metrics else train_metrics,
                         self.config,
                         checkpoint_path,
-                        is_best=is_best
+                        is_best=is_best,
+                        clustering_scaler=clustering_scaler
                     )
             else:
                 # HPC tuning mode: only save best checkpoint
-                if is_best:
-                    checkpoint_path = Path(self.config.checkpoint_dir) / f'{self.config.model_identifier}_best.pt'
+                # FIXED: In final training mode (no validation), save periodically or always update best.pt
+                if is_best or (not val_metrics and epoch % self.config.checkpoint_interval == 0):
+                    checkpoint_path = Path(self.config.checkpoint_dir) / 'best.pt'
                     save_checkpoint(
                         self.model,
                         self.optimizer,
@@ -635,29 +685,62 @@ class Trainer:
                         val_metrics if val_metrics else train_metrics,
                         self.config,
                         checkpoint_path,
-                        is_best=True
+                        is_best=True,
+                        clustering_scaler=clustering_scaler
                     )
+                    if not val_metrics:
+                        logger.debug("Saved checkpoint at epoch %d (final training mode, no validation)", epoch)
 
-            # Early stopping
-            if val_metrics:
-                if self.early_stopping(val_metrics['accuracy']):
-                    logger.info(f"Early stopping at epoch {epoch}")
-                    break
+            # Early stopping based on monitoring metric
+            should_stop = False
+            if self.early_stopping_metric == 'val_acc' and val_metrics:
+                should_stop = self.early_stopping(val_metrics['accuracy'])
+            elif self.early_stopping_metric == 'train_loss':
+                should_stop = self.early_stopping(train_metrics['loss'])
 
-        # Save final checkpoint (only if checkpoint saving is enabled)
-        if self.config.enable_checkpoint_saving:
-            final_model_dir = Path(self.config.output_root_dir) / 'models'
-            final_model_dir.mkdir(parents=True, exist_ok=True)
-            final_checkpoint_path = final_model_dir / f'{self.config.model_identifier}_final_model.pth'
-            save_checkpoint(
-                self.model,
-                self.optimizer,
-                self.scheduler,
-                epoch,
-                val_metrics if val_metrics else train_metrics,
-                self.config,
-                final_checkpoint_path
-            )
+            if should_stop:
+                logger.info(f"Early stopping at epoch {epoch} (monitoring {self.early_stopping_metric})")
+                break
+
+        # Save final checkpoint
+        # FIXED: Always save final model, regardless of enable_checkpoint_saving setting
+        final_model_dir = Path(self.config.output_root_dir) / 'models'
+        final_model_dir.mkdir(parents=True, exist_ok=True)
+        final_checkpoint_path = final_model_dir / f'{self.config.model_identifier}_final_model.pth'
+        
+        # Get clustering_scaler from config if available
+        clustering_scaler = getattr(self.config, 'clustering_scaler', None)
+        
+        save_checkpoint(
+            self.model,
+            self.optimizer,
+            self.scheduler,
+            epoch,
+            val_metrics if val_metrics else train_metrics,
+            self.config,
+            final_checkpoint_path,
+            clustering_scaler=clustering_scaler
+        )
+        logger.info("Final model saved to: %s", final_checkpoint_path)
+        
+        # In HPC mode (no checkpoint saving), ensure best.pt exists
+        if not self.config.enable_checkpoint_saving:
+            best_pt_path = Path(self.config.checkpoint_dir) / 'best.pt'
+            if not best_pt_path.exists():
+                # If no best.pt was saved during training (e.g., final mode with no validation),
+                # save the final model as best.pt
+                logger.info("No best.pt found in HPC mode, saving final model as best.pt")
+                save_checkpoint(
+                    self.model,
+                    self.optimizer,
+                    self.scheduler,
+                    epoch,
+                    val_metrics if val_metrics else train_metrics,
+                    self.config,
+                    best_pt_path,
+                    is_best=True,
+                    clustering_scaler=clustering_scaler
+                )
 
         # Save training history
         history_path = Path(self.config.checkpoint_dir) / f'{self.config.model_identifier}_training_history.json'

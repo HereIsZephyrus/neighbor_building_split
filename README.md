@@ -4,7 +4,7 @@
 [![PyTorch 2.0+](https://img.shields.io/badge/pytorch-2.0+-ee4c2c.svg)](https://pytorch.org/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 
-<This Doc archived by AI>
+!Notice This Doc archived by AI
 
 [中文文档](README_zh.md) | English
 
@@ -358,18 +358,6 @@ output/predictions/
    - Adjust `similarity_loss.temperature` (lower = less smoothing)
    - Tune spectral clustering weights (`embedding_weight`, `feature_weight`)
    - Increase training `epochs` or adjust `patience`
-
-## Citation
-
-If you use this project in your research, please cite:
-
-```bibtex
-@software{building_lcz_classification,
-  title = {Building Pattern Segmentation and LCZ Classification},
-  year = {2025},
-  url = {https://github.com/your-repo/neighbor_building_split}
-}
-```
 
 ## License
 
